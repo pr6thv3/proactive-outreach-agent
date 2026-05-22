@@ -1,0 +1,557 @@
+// This is your Prisma schema file,
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── LEADS ──────────────────────────────────────────────
+model Lead {
+  id            String   @id @default(cuid())
+  name          String
+  email         String
+  company       String?
+  title         String?
+  url           String?   // Company or personal website URL
+  linkedinUrl   String?   // LinkedIn profile URL
+  status        String    @default("new")
+  // Lifecycle: new → enriched → scored → generated → approved → sent → replied → interested/negative/unsubscribed
+  source        String    @default("manual") // manual, csv_import, linkedin_list, api, autonomous_discovery
+  emailVerified Boolean   @default(false)
+  isBlacklisted Boolean   @default(false)
+  doNotContact  Boolean   @default(false)
+  lastContacted DateTime?
+  notes         String?
+
+  // ─── Scoring Fields ───
+  leadScore       Float    @default(0)   // 0-100 composite
+  signalScore     Float    @default(0)   // 0-100 signal strength
+  replyProb       Float    @default(0)   // 0-1 reply probability
+  conversionProb  Float    @default(0)   // 0-1 conversion probability
+  spamRisk        Float    @default(0)   // 0-1 spam risk
+  priorityTier    String   @default("cold") // hot, warm, cold
+
+  // ─── Autonomy Fields ───
+  nextActionAt    DateTime?  // When the autonomous engine should next act on this lead
+  autonomyEnabled Boolean   @default(false) // Whether this lead is in the autonomous loop
+  lastAutonomousRun DateTime?
+
+  signals       Signal[]
+  messages      OutreachMessage[]
+  activities    Activity[]
+  scrapeData    ScrapeData[]
+  scores        LeadScoreHistory[]
+  memoryEntries AgentMemory[]
+
+  @@unique([email])
+  @@index([status])
+  @@index([company])
+  @@index([isBlacklisted])
+  @@index([doNotContact])
+  @@index([leadScore])
+  @@index([priorityTier])
+  @@index([nextActionAt])
+  @@index([autonomyEnabled])
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// ─── SIGNALS (OBSERVE phase output) ────────────────────
+model Signal {
+  id          String   @id @default(cuid())
+  type        String   // pain_point, hiring, hiring_spike, growth, tech_stack, personalization_hook, trigger, news, funding, funding_round, expansion, traffic_drop, product_launch, engineering_hiring_spike, rebranding, seo_decline, tech_stack_migration, competitor_pressure, ai_adoption_signal, job_change
+  content     String
+  source      String   // web_scraper, signal_extractor_llm, signal_intelligence, csv_import, manual, web_search
+  relevance   Float    @default(0.5) // 0.0 - 1.0
+  confidence  Float    @default(0.5) // 0.0 - 1.0 — how confident we are this signal is real
+  rawSnippet  String?  // The original text the signal was extracted from
+
+  // ─── Signal Intelligence Fields (THE MOAT) ───
+  urgency             Float    @default(0.5) // 0.0 - 1.0 — WHY outreach should happen NOW
+  reasoning           String?  // Why this signal is timely and actionable
+  recommendedPitchAngle String? // e.g. "Growth partnership — help them scale post-funding"
+  recommendedOffer    String?  // e.g. "Free onboarding package for new engineering hires"
+  decayRate           Float    @default(0.02) // How quickly this signal loses urgency per day
+  detectedAt          DateTime @default(now()) // When the signal was first detected
+  expiresAt           DateTime? // When the signal is no longer timely
+
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([type])
+  @@index([urgency])
+  @@index([expiresAt])
+  @@index([detectedAt])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── SCRAPE DATA (raw scraped content) ─────────────────
+model ScrapeData {
+  id          String   @id @default(cuid())
+  url         String
+  pageTitle   String?
+  aboutText   String?
+  careersText String?
+  blogText    String?
+  newsText    String?
+  rawHtml     String?  // Truncated raw HTML for debugging
+  status      String   @default("pending") // pending, completed, failed
+  errorMessage String?
+  scrapedAt   DateTime?
+
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── CAMPAIGNS ─────────────────────────────────────────
+model Campaign {
+  id              String   @id @default(cuid())
+  name            String
+  status          String   @default("draft") // draft, running, paused, completed, archived
+  goal            String?  // e.g. "Book 20 demo calls"
+  targetAudience  String?  // e.g. "VP Engineering at SaaS companies"
+  offer           String?  // e.g. "Free 14-day trial of our platform"
+  senderName      String?  // e.g. "Alex from OutReachAI"
+  senderEmail     String?  // e.g. "alex@outreachai.com"
+  tone            String   @default("professional") // professional, friendly, casual, consultative
+  cta             String?  // e.g. "Book a 15-min chat"
+  maxDailySends   Int      @default(50)
+  followUpSchedule String  @default("[3,7,14]") // JSON array of day offsets
+  productDescription String? // Used by LLM for pitch generation
+  dailySendsCount Int      @default(0) // Tracks sends today
+  dailySendsDate  String?  // YYYY-MM-DD of last send tracking
+
+  // ─── Multi-channel Config ───
+  channels        String   @default("[\"email\"]") // JSON array: ["email","linkedin","twitter","sms","contact_form"]
+  linkedinEnabled Boolean  @default(false)
+  twitterEnabled  Boolean  @default(false)
+  smsEnabled      Boolean  @default(false)
+  contactFormEnabled Boolean @default(false)
+  linkedinMessageTemplate String? // Template for LinkedIn outreach
+  twitterDmTemplate      String? // Template for Twitter DMs
+  smsTemplate            String? // Template for SMS
+  contactFormTemplate    String? // Template for contact form submissions
+
+  // ─── Autonomy Config ───
+  autonomyEnabled Boolean  @default(false) // Enable autonomous pipeline runs
+  autonomyMinScore Float   @default(60)   // Minimum lead score to auto-engage
+  autonomyMaxDailyActions Int @default(20) // Max autonomous actions per day
+  autonomyActionsToday  Int @default(0)
+  autonomyLastActionDate String? // YYYY-MM-DD
+
+  messages        OutreachMessage[]
+
+  @@index([status])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ─── OUTREACH MESSAGES (THINK + ACT phase output) ──────
+model OutreachMessage {
+  id          String   @id @default(cuid())
+  subject     String
+  body        String
+  channel     String   @default("email") // email, linkedin, twitter, sms, contact_form, voice_note
+  status      String   @default("draft")
+  // Lifecycle: draft → generated → approved → sent → delivered/bounced → replied
+
+  strategy    String?
+  angle       String?
+  tone        String?
+  cta         String?  // The call-to-action used
+  sequencePos Int      @default(0) // 0=first email, 1=followup1, 2=followup2, 3=followup3
+
+  // ─── Signal Intelligence Context ───
+  signalTypeUsed    String? // Which signal type was used to generate this message
+  urgencyAtGeneration Float? // The urgency score at time of generation
+  pitchAngleUsed    String? // The pitch angle that was used
+
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  campaignId  String?
+  campaign    Campaign? @relation(fields: [campaignId], references: [id])
+
+  followUps   FollowUp[]
+  replies     ReplyClassification[]
+
+  approvedBy  String?  // User who approved
+  approvedAt  DateTime?
+  sentAt      DateTime?
+  unsubFooter String?  // The unsubscribe text appended
+
+  // ─── Delivery Tracking ───
+  deliveredAt DateTime?
+  bouncedAt   DateTime?
+  bounceReason String?
+  openedAt    DateTime?
+  clickedAt   DateTime?
+  repliedAt   DateTime?
+
+  @@index([leadId])
+  @@index([status])
+  @@index([campaignId])
+  @@index([channel])
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─── FOLLOW-UPS (ACT phase - scheduled sequences) ──────
+model FollowUp {
+  id          String   @id @default(cuid())
+  scheduledAt DateTime
+  status      String   @default("scheduled") // scheduled, sent, skipped, cancelled
+  type        String   @default("reminder") // reminder, value_add, check_in, last_attempt
+  body        String?
+  sequencePos Int      @default(1) // 1, 2, 3
+  channel     String   @default("email") // email, linkedin, twitter, sms, contact_form
+
+  messageId   String
+  message     OutreachMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([status])
+  @@index([scheduledAt])
+
+  sentAt      DateTime?
+  createdAt   DateTime @default(now())
+}
+
+// ─── REPLY CLASSIFICATION (RE-EVAL phase output) ───────
+model ReplyClassification {
+  id          String   @id @default(cuid())
+  category    String   // interested, neutral, negative, unsubscribe, needs_info, out_of_office
+  confidence  Float    @default(0.0)
+  reasoning   String?
+  replyText   String?
+  nextAction  String?  // escalate, auto_reply, schedule_followup, mark_unsub, stop_sequence, no_action
+
+  // ─── Memory Feedback ───
+  feedbackToMemory  Boolean  @default(false) // Whether this was used to update agent memory
+  hookUsedAtSend    String?  // The hook that was used when the original message was sent
+
+  messageId   String
+  message     OutreachMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([category])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── ACTIVITY LOG (per-lead timeline) ──────────────────
+model Activity {
+  id          String   @id @default(cuid())
+  type        String   // lead_created, enriched, scored, email_generated, email_approved, email_sent, reply_received, reply_classified, lead_unsubscribed, lead_blacklisted, campaign_assigned, note_added, signal_detected, autonomous_action, memory_updated, channel_switch
+  description String
+  metadata    String?  // JSON string with extra context
+  phase       String?  // observe, think, act, reeval, system, autonomy, memory
+
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([type])
+  @@index([createdAt])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── PIPELINE RUN LOG ──────────────────────────────────
+model PipelineRun {
+  id          String   @id @default(cuid())
+  phase       String
+  status      String   @default("running")
+  input       String?
+  output      String?
+  error       String?
+  durationMs  Int?
+  retryCount  Int      @default(0)
+
+  leadId      String?
+  agentName   String?
+  campaignId  String?
+
+  // ─── Observability ───
+  traceId     String?  // Distributed tracing ID
+  parentRunId String?  // For nested pipeline runs
+  logs        String?  // JSON array of structured log entries
+
+  @@index([phase])
+  @@index([status])
+  @@index([leadId])
+  @@index([traceId])
+
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+}
+
+// ─── DO NOT CONTACT LIST ───────────────────────────────
+model DoNotContact {
+  id          String   @id @default(cuid())
+  email       String
+  reason      String?  // unsubscribed, manual, complained, bounced
+  source      String?  // reply_classifier, manual_import, bounce_notification
+  leadId      String?
+
+  @@unique([email])
+  @@index([email])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── LEAD SCORE HISTORY (track score changes over time) ──
+model LeadScoreHistory {
+  id              String   @id @default(cuid())
+  leadScore       Float
+  signalScore     Float
+  replyProb       Float
+  conversionProb  Float
+  spamRisk        Float
+  priorityTier    String
+  reason          String?  // What triggered the score change
+  scoringVersion  String   @default("v1") // For tracking model versions
+
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([createdAt])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── AGENT MEMORY (compounding intelligence) ───────────
+model AgentMemory {
+  id          String   @id @default(cuid())
+  category    String   // winning_hook, reply_rate, industry_pattern, persona_pattern, channel_effectiveness, signal_correlation, campaign_result, offer_performance
+  key         String   // e.g. "saas_vp_eng_professional", "funding_round_hook", "linkedin_reply_rate"
+  value       String   // JSON-serialized value
+  score       Float    @default(0.5) // 0-1 effectiveness score
+  sampleSize  Int      @default(1) // How many data points contributed
+  industry    String?  // e.g. "SaaS", "Fintech"
+  persona     String?  // e.g. "VP Engineering", "CTO"
+  channel     String?  // e.g. "email", "linkedin"
+
+  // ─── Decay & Freshness ───
+  lastUsedAt  DateTime @default(now())
+  useCount    Int      @default(1)
+  successCount Int     @default(0) // Times this memory item led to positive outcome
+  failCount   Int      @default(0) // Times this led to negative outcome
+
+  leadId      String?
+  lead        Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  campaignId  String?
+
+  @@index([category])
+  @@index([key])
+  @@index([industry])
+  @@index([persona])
+  @@index([channel])
+  @@index([score])
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─── BACKGROUND JOB QUEUE (replaces BullMQ for SQLite) ──
+model JobQueue {
+  id          String   @id @default(cuid())
+  type        String   // scrape, signal_extract, score, generate_email, send_email, follow_up, classify_reply, autonomous_discover, autonomous_engage, signal_decay
+  status      String   @default("pending") // pending, running, completed, failed, dead
+  priority    Int      @default(5) // 1=highest, 10=lowest
+  payload     String   // JSON payload for the job
+  result      String?  // JSON result after completion
+  error       String?
+  retryCount  Int      @default(0)
+  maxRetries  Int      @default(3)
+
+  leadId      String?
+  campaignId  String?
+  traceId     String?
+
+  // ─── Scheduling ───
+  scheduledAt DateTime  @default(now()) // When to run the job
+  startedAt   DateTime?
+  completedAt DateTime?
+  deadLetteredAt DateTime? // Moved to dead letter queue
+
+  @@index([type])
+  @@index([status])
+  @@index([priority])
+  @@index([scheduledAt])
+  @@index([status, scheduledAt])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── SENDING DOMAINS (Deliverability) ─────────────────
+model SendingDomain {
+  id              String   @id @default(cuid())
+  domain          String   @unique  // e.g. "outreach.yourcompany.com"
+  status          String   @default("pending") // pending, verifying, verified, failed, suspended
+  provider        String   @default("resend") // resend, mailgun, postmark, custom_smtp
+
+  // ─── DNS Records ───
+  spfRecord       String?  // The SPF record value
+  spfVerified     Boolean  @default(false)
+  dkimRecord      String?  // The DKIM record value
+  dkimVerified    Boolean  @default(false)
+  dmarcRecord     String?  // The DMARC record value
+  dmarcVerified   Boolean  @default(false)
+
+  // ─── Warmup & Reputation ───
+  warmupEnabled   Boolean  @default(true)
+  warmupDay       Int      @default(0)       // Current day in warmup schedule (0-30)
+  warmupDailyLimit Int     @default(5)       // Current daily send limit during warmup
+  dailySendsCount Int      @default(0)
+  dailySendsDate  String?  // YYYY-MM-DD
+
+  // ─── Reputation Metrics ───
+  totalSent       Int      @default(0)
+  totalDelivered  Int      @default(0)
+  totalBounced    Int      @default(0)
+  totalComplained Int      @default(0)
+  totalOpened     Int      @default(0)
+  totalClicked    Int      @default(0)
+  bounceRate      Float    @default(0)   // 0-1
+  complaintRate   Float    @default(0)   // 0-1
+  openRate        Float    @default(0)   // 0-1
+  clickRate       Float    @default(0)   // 0-1
+  reputationScore Float    @default(50)  // 0-100 (higher is better)
+
+  // ─── Provider Integration ───
+  apiKeyRef       String?  // Reference to stored API key (never store raw keys)
+  fromEmail       String?  // Default from email for this domain
+  fromName        String?  // Default from name
+  replyTo         String?  // Reply-to address
+
+  lastVerifiedAt  DateTime?
+  lastDnsCheckAt  DateTime?
+
+  @@index([domain])
+  @@index([status])
+  @@index([reputationScore])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ─── EMAIL EVENTS (Delivery Tracking) ─────────────────
+model EmailEvent {
+  id          String   @id @default(cuid())
+  eventType   String   // sent, delivered, bounced, opened, clicked, complained, unsubscribed, deferred
+  providerId  String?  // ID from the email provider (Resend message ID, etc.)
+  recipient   String   // The email address this event is about
+
+  // ─── Event Details ───
+  bounceType     String?  // hard, soft, feedback
+  bounceReason   String?  // Human-readable bounce reason
+  userAgent      String?  // For opens/clicks
+  ipAddress      String?  // For opens/clicks
+  clickUrl       String?  // For click events
+  complaintType  String?  // abuse, fraud, virus
+
+  // ─── Linking ───
+  messageId      String?  // Our internal OutreachMessage ID
+  leadId         String?
+  campaignId     String?
+  domainId       String?  // SendingDomain that sent this
+
+  // ─── Raw Event Data ───
+  rawData        String?  // JSON: the full webhook payload for debugging
+
+  @@index([eventType])
+  @@index([recipient])
+  @@index([messageId])
+  @@index([campaignId])
+  @@index([domainId])
+  @@index([createdAt])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── MESSAGE EDITS (Human-in-the-Loop Learning) ───────
+model MessageEdit {
+  id              String   @id @default(cuid())
+  messageId       String
+  editType        String   // subject_changed, body_changed, cta_changed, hook_changed, full_rewrite, minor_edit, deletion
+  fieldName       String   // subject, body, cta, angle, tone, strategy
+
+  // ─── Before/After ───
+  originalValue   String?  // What the AI generated
+  editedValue     String?  // What the human changed it to
+
+  // ─── Diff Analysis ───
+  changeMagnitude Float    @default(0)   // 0-1: how much changed (0=trivial, 1=complete rewrite)
+  addedWords      Int      @default(0)
+  removedWords    Int      @default(0)
+  keptPhrases     String?  // JSON array of phrases the user kept (these are GOLD)
+
+  // ─── Context ───
+  signalTypeUsed  String?  // What signal was used to generate the original
+  pitchAngleUsed  String?  // What pitch angle was used
+  urgencyAtGeneration Float?
+
+  // ─── Learning Signal ───
+  outcomeAfterEdit String? // replied, interested, bounced, unsubscribed, no_response (filled later)
+  fedToMemory     Boolean  @default(false) // Whether this edit was used to update agent memory
+
+  leadId          String?
+  campaignId      String?
+
+  @@index([messageId])
+  @@index([editType])
+  @@index([fieldName])
+  @@index([changeMagnitude])
+  @@index([outcomeAfterEdit])
+  @@index([fedToMemory])
+  @@index([createdAt])
+
+  createdAt   DateTime @default(now())
+}
+
+// ─── SENDING REPUTATION HISTORY ───────────────────────
+model ReputationSnapshot {
+  id              String   @id @default(cuid())
+  domainId        String
+
+  // ─── Daily Metrics ───
+  date            String   // YYYY-MM-DD
+  emailsSent      Int      @default(0)
+  emailsDelivered Int      @default(0)
+  emailsBounced   Int      @default(0)
+  emailsOpened    Int      @default(0)
+  emailsClicked   Int      @default(0)
+  emailsComplained Int     @default(0)
+  emailsUnsubscribed Int   @default(0)
+
+  // ─── Calculated Rates ───
+  deliveryRate    Float    @default(0) // delivered / sent
+  bounceRate      Float    @default(0) // bounced / sent
+  openRate        Float    @default(0) // opened / delivered
+  clickRate       Float    @default(0) // clicked / opened
+  complaintRate   Float    @default(0) // complained / sent
+  replyRate       Float    @default(0) // replied / delivered
+  positiveReplyRate Float  @default(0) // interested / replied
+
+  // ─── Reputation ───
+  reputationScore Float    @default(50) // 0-100
+
+  @@index([domainId])
+  @@index([date])
+  @@unique([domainId, date])
+
+  createdAt   DateTime @default(now())
+}
