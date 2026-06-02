@@ -9,8 +9,9 @@ import { handleBounce, handleUnsubscribe, classifyBounce, type BounceEvent } fro
 import { addTrackingToHtml, textToHtml, handleTrackedOpen, handleTrackedClick } from './tracking';
 import { scheduleSends, isInSendWindow, getOptimalSendTime, MIN_SEND_INTERVAL_MS } from './send-cadence';
 import { db } from '@/lib/db';
-import { isLeadSafeToContact, appendUnsubscribeFooter } from '@/lib/safety';
+import { isLeadSafeToContact, appendUnsubscribeFooter, checkSendingLimit } from '@/lib/safety';
 import { logger } from '@/lib/agents/infrastructure/observability';
+import type { Campaign, Lead, OutreachMessage, SenderAccount, SendingDomain } from '@prisma/client';
 
 export interface SendResult {
   success: boolean;
@@ -33,6 +34,7 @@ class DeliverabilityServiceClass {
    * Real email sending via Resend with full tracking, warmup awareness, and safety
    */
   async sendEmail(params: {
+    organizationId: string;
     to: string;
     from?: string;
     fromName?: string;
@@ -46,40 +48,27 @@ class DeliverabilityServiceClass {
     dryRun?: boolean;
   }): Promise<SendResult> {
     const {
-      to, from, fromName, subject, body, html, replyTo,
+      organizationId, to, subject, body, html,
       messageId, leadId, campaignId, dryRun = false,
     } = params;
 
-    // ═══ SAFETY CHECKS ═══
-    if (leadId) {
-      const safety = await isLeadSafeToContact(leadId);
-      if (!safety.safe) {
-        return { success: false, error: `Safety check failed: ${safety.reasons.join(', ')}` };
-      }
-    }
-
-    // ═══ DOMAIN & WARMUP CHECK ═══
-    const domain = await this.getBestSendingDomain();
-    if (!domain) {
-      return { success: false, error: 'No verified sending domain configured. Add a domain in Deliverability settings.' };
-    }
-
-    // Check warmup quota
-    const canSend = await canSendMore(domain.id);
-    if (!canSend.allowed) {
-      return { success: false, error: canSend.reason || 'Daily sending limit reached (domain warmup)' };
-    }
-
-    // Check reputation
-    const pauseCheck = await shouldPauseSending(domain.id);
-    if (pauseCheck.pause) {
-      return { success: false, error: `Sending paused: ${pauseCheck.reason}` };
+    let sendContext: Awaited<ReturnType<DeliverabilityServiceClass['assertCanSend']>>;
+    try {
+      sendContext = await this.assertCanSend({
+        organizationId,
+        campaignId,
+        leadId,
+        messageId,
+      });
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error), messageId };
     }
 
     // ═══ PREPARE EMAIL ═══
-    const senderEmail = from || domain.fromEmail || process.env.DEFAULT_SENDER_EMAIL || 'outreach@company.com';
-    const senderName = fromName || domain.fromName || process.env.DEFAULT_SENDER_NAME || 'Outreach';
-    const replyToEmail = replyTo || domain.replyTo || process.env.DEFAULT_REPLY_TO;
+    const { domain, sender } = sendContext;
+    const senderEmail = sender.email;
+    const senderName = sender.name || domain.fromName || process.env.DEFAULT_SENDER_NAME || 'Outreach';
+    const replyToEmail = sender.replyTo || domain.replyTo || process.env.DEFAULT_REPLY_TO;
     const fromFormatted = `${senderName} <${senderEmail}>`;
 
     // Add unsubscribe footer to text
@@ -138,6 +127,7 @@ class DeliverabilityServiceClass {
       html: trackedHtml,
       text: bodyWithFooter,
       replyTo: replyToEmail,
+      organizationId,
       messageId,
       leadId,
       campaignId,
@@ -158,6 +148,7 @@ class DeliverabilityServiceClass {
           sentAt: new Date(),
           body: bodyWithFooter,
           unsubFooter: 'List-Unsubscribe header + footer appended',
+          senderId: sender.id,
         },
       }).catch(() => {});
     }
@@ -173,6 +164,7 @@ class DeliverabilityServiceClass {
     // Increment domain send count
     await incrementDomainSendCount(domain.id);
     await updateDomainMetrics(domain.id, 'sent');
+    await this.incrementSenderSendCount(sender.id);
 
     // Log activity
     if (leadId) {
@@ -181,8 +173,9 @@ class DeliverabilityServiceClass {
           type: 'email_sent',
           description: `Email sent to ${to}: "${subject.slice(0, 50)}"`,
           phase: 'act',
+          organizationId,
           leadId,
-          metadata: JSON.stringify({ messageId, campaignId, providerId: result.providerId, domainId: domain.id }),
+          metadata: JSON.stringify({ messageId, campaignId, providerId: result.providerId, domainId: domain.id, senderId: sender.id }),
         },
       }).catch(() => {});
     }
@@ -206,15 +199,16 @@ class DeliverabilityServiceClass {
    * Add and verify a new sending domain
    */
   async addDomain(params: {
+    organizationId: string;
     domain: string;
     fromEmail: string;
     fromName?: string;
     replyTo?: string;
   }): Promise<DomainSetupResult> {
-    const { domain: domainName, fromEmail, fromName, replyTo } = params;
+    const { organizationId, domain: domainName, fromEmail, fromName, replyTo } = params;
 
     // Check if domain already exists
-    const existing = await db.sendingDomain.findUnique({ where: { domain: domainName } });
+    const existing = await db.sendingDomain.findFirst({ where: { organizationId, domain: domainName } });
     if (existing) {
       return { success: false, error: 'Domain already exists', domainId: existing.id };
     }
@@ -238,6 +232,7 @@ class DeliverabilityServiceClass {
     // Save to database
     const domain = await db.sendingDomain.create({
       data: {
+        organizationId,
         domain: domainName,
         status: 'pending',
         provider: 'resend',
@@ -248,6 +243,19 @@ class DeliverabilityServiceClass {
         warmupEnabled: true,
         warmupDay: 0,
         warmupDailyLimit: 5,
+      },
+    });
+
+    await db.senderAccount.create({
+      data: {
+        organizationId,
+        domainId: domain.id,
+        email: fromEmail,
+        name: fromName || fromEmail.split('@')[0],
+        replyTo: replyTo || fromEmail,
+        provider: 'resend',
+        status: 'pending',
+        dailyLimit: 25,
       },
     });
 
@@ -274,20 +282,165 @@ class DeliverabilityServiceClass {
       dmarcVerified: status.dmarc.verified,
     });
 
+    if (status.overallStatus === 'verified') {
+      await db.senderAccount.updateMany({
+        where: { domainId, status: 'pending' },
+        data: { status: 'active' },
+      });
+    }
+
     return status;
   }
 
-  /**
-   * Get the best sending domain to use
-   */
-  private async getBestSendingDomain() {
-    // Find the highest reputation verified domain
-    return db.sendingDomain.findFirst({
-      where: { status: 'verified' },
-      orderBy: { reputationScore: 'desc' },
-    }) || db.sendingDomain.findFirst({
-      where: { status: 'pending' },
-      orderBy: { reputationScore: 'desc' },
+  async assertCanSend(params: {
+    organizationId: string;
+    campaignId?: string;
+    leadId?: string;
+    messageId?: string;
+    senderId?: string;
+  }): Promise<{
+    lead?: Lead;
+    campaign?: Campaign;
+    message?: OutreachMessage;
+    sender: SenderAccount;
+    domain: SendingDomain;
+  }> {
+    const { organizationId, campaignId, leadId, messageId, senderId } = params;
+    if (!organizationId) throw new Error('organizationId is required');
+
+    const message = messageId
+      ? await db.outreachMessage.findFirst({ where: { id: messageId, organizationId } })
+      : null;
+    if (messageId && !message) throw new Error('Message not found');
+    if (message && message.status !== 'approved') {
+      throw new Error(`Message must be approved before sending; current status is ${message.status}`);
+    }
+
+    const resolvedLeadId = leadId || message?.leadId;
+    if (!resolvedLeadId) throw new Error('leadId is required');
+    const lead = await db.lead.findFirst({ where: { id: resolvedLeadId, organizationId } });
+    if (!lead) throw new Error('Lead not found');
+
+    const safety = await isLeadSafeToContact(lead.id, organizationId);
+    if (!safety.safe) {
+      throw new Error(`Safety check failed: ${safety.reasons.join(', ')}`);
+    }
+
+    const resolvedCampaignId = campaignId || message?.campaignId || undefined;
+    const campaign = resolvedCampaignId
+      ? await db.campaign.findFirst({ where: { id: resolvedCampaignId, organizationId } })
+      : null;
+    if (resolvedCampaignId && !campaign) throw new Error('Campaign not found');
+    if (campaign?.status && ['paused', 'archived', 'completed'].includes(campaign.status)) {
+      throw new Error(`Campaign is not sendable: ${campaign.status}${campaign.pausedReason ? ` (${campaign.pausedReason})` : ''}`);
+    }
+
+    if (campaign) {
+      const campaignLimit = await checkSendingLimit(campaign.id);
+      if (!campaignLimit.allowed) {
+        throw new Error('Campaign daily sending limit reached');
+      }
+    }
+
+    const selection = await this.selectSender({ organizationId, campaignId: resolvedCampaignId, senderId: senderId || message?.senderId || undefined });
+    const canSend = await canSendMore(selection.domain.id);
+    if (!canSend.allowed) {
+      throw new Error(canSend.reason || 'Daily sending limit reached (domain warmup)');
+    }
+
+    const pauseCheck = await shouldPauseSending(selection.domain.id);
+    if (pauseCheck.pause) {
+      throw new Error(`Sending paused: ${pauseCheck.reason}`);
+    }
+
+    return {
+      lead,
+      campaign: campaign || undefined,
+      message: message || undefined,
+      sender: selection.sender,
+      domain: selection.domain,
+    };
+  }
+
+  private async selectSender(params: {
+    organizationId: string;
+    campaignId?: string;
+    senderId?: string;
+  }): Promise<{ sender: SenderAccount; domain: SendingDomain }> {
+    const today = new Date().toISOString().split('T')[0];
+
+    if (params.senderId) {
+      const sender = await db.senderAccount.findFirst({
+        where: { id: params.senderId, organizationId: params.organizationId },
+        include: { domain: true },
+      });
+      if (!sender || !sender.domain) throw new Error('Approved sender not found');
+      this.assertSenderHealthy(sender, sender.domain, today);
+      return { sender, domain: sender.domain };
+    }
+
+    let pooledSenderIds: string[] | undefined;
+    if (params.campaignId) {
+      const pool = await db.campaignSenderPool.findMany({
+        where: { organizationId: params.organizationId, campaignId: params.campaignId, enabled: true, senderId: { not: null } },
+        select: { senderId: true },
+      });
+      pooledSenderIds = pool.map(row => row.senderId).filter((id): id is string => Boolean(id));
+    }
+
+    const senders = await db.senderAccount.findMany({
+      where: {
+        organizationId: params.organizationId,
+        ...(pooledSenderIds && pooledSenderIds.length > 0 ? { id: { in: pooledSenderIds } } : {}),
+      },
+      include: { domain: true },
+      orderBy: [{ lastSentAt: 'asc' }, { reputationScore: 'desc' }],
+    });
+
+    const eligible = senders.filter(sender => {
+      if (!sender.domain) return false;
+      try {
+        this.assertSenderHealthy(sender, sender.domain, today);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+    if (eligible.length === 0) {
+      throw new Error('No active sender with a verified healthy domain is available');
+    }
+
+    const sender = eligible[0];
+    return { sender, domain: sender.domain! };
+  }
+
+  private assertSenderHealthy(sender: SenderAccount, domain: SendingDomain, today: string) {
+    if (sender.status !== 'active') throw new Error(`Sender is not active: ${sender.status}`);
+    if (domain.status !== 'verified') throw new Error(`Sending domain is not verified: ${domain.status}`);
+    if (domain.reputationScore < 30) throw new Error('Domain reputation is too low');
+    if (sender.reputationScore < 30) throw new Error('Sender reputation is too low');
+
+    const sentToday = sender.sentTodayDate === today ? sender.sentToday : 0;
+    if (sentToday >= sender.dailyLimit) {
+      throw new Error('Sender daily limit reached');
+    }
+
+    const domainSentToday = domain.dailySendsDate === today ? domain.dailySendsCount : 0;
+    if (domainSentToday >= domain.dailyLimit) {
+      throw new Error('Domain daily limit reached');
+    }
+  }
+
+  private async incrementSenderSendCount(senderId: string) {
+    const sender = await db.senderAccount.findUnique({ where: { id: senderId } });
+    if (!sender) return;
+
+    const today = new Date().toISOString().split('T')[0];
+    const sentToday = sender.sentTodayDate === today ? sender.sentToday + 1 : 1;
+    await db.senderAccount.update({
+      where: { id: senderId },
+      data: { sentToday, sentTodayDate: today, lastSentAt: new Date() },
     });
   }
 
@@ -296,6 +449,7 @@ class DeliverabilityServiceClass {
    */
   async recordEvent(params: {
     eventType: string;
+    organizationId?: string;
     providerId?: string;
     recipient: string;
     messageId?: string;
@@ -327,6 +481,7 @@ class DeliverabilityServiceClass {
 
       case 'bounced':
         await handleBounce({
+          organizationId: params.organizationId,
           recipient: params.recipient,
           bounceType: params.bounceType,
           bounceReason: params.bounceReason,
@@ -361,6 +516,7 @@ class DeliverabilityServiceClass {
 
       case 'complained':
         await handleBounce({
+          organizationId: params.organizationId,
           recipient: params.recipient,
           bounceType: 'feedback',
           bounceReason: 'Spam complaint',
@@ -375,6 +531,7 @@ class DeliverabilityServiceClass {
 
       case 'unsubscribed':
         await handleUnsubscribe({
+          organizationId: params.organizationId,
           recipient: params.recipient,
           messageId: params.messageId,
           leadId: params.leadId,
@@ -406,19 +563,19 @@ class DeliverabilityServiceClass {
   /**
    * Get deliverability summary for dashboard
    */
-  async getDeliverabilitySummary() {
-    const domains = await db.sendingDomain.findMany({ orderBy: { reputationScore: 'desc' } });
+  async getDeliverabilitySummary(organizationId: string) {
+    const domains = await db.sendingDomain.findMany({ where: { organizationId }, orderBy: { reputationScore: 'desc' } });
 
     // Aggregate email events
     const [
       totalSent, totalDelivered, totalBounced, totalOpened, totalClicked, totalComplained,
     ] = await Promise.all([
-      db.emailEvent.count({ where: { eventType: 'sent' } }),
-      db.emailEvent.count({ where: { eventType: 'delivered' } }),
-      db.emailEvent.count({ where: { eventType: 'bounced' } }),
-      db.emailEvent.count({ where: { eventType: 'opened' } }),
-      db.emailEvent.count({ where: { eventType: 'clicked' } }),
-      db.emailEvent.count({ where: { eventType: 'complained' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'sent' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'delivered' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'bounced' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'opened' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'clicked' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'complained' } }),
     ]);
 
     const deliveryRate = totalSent > 0 ? totalDelivered / totalSent : 0;

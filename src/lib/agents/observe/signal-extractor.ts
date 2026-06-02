@@ -259,10 +259,11 @@ NEVER generate generic signals like "may face challenges" — be specific and ac
       });
 
       const responseText = completion.choices[0]?.message?.content || '[]';
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      // Safely extract JSON even if wrapped in markdown code blocks
+      const jsonMatch = responseText.match(/\[[\s\S]*\]/)?.[0] || '[]';
 
-      if (jsonMatch) {
-        const extracted = JSON.parse(jsonMatch[0]);
+      try {
+        const extracted = JSON.parse(jsonMatch);
         for (const sig of extracted) {
           const normalisedType = sig.type?.toLowerCase().replace(/\s+/g, '_') || 'pain_point';
           const template = SIGNAL_TEMPLATES[normalisedType];
@@ -312,6 +313,8 @@ NEVER generate generic signals like "may face challenges" — be specific and ac
             signals.push(mapSignalFull(painSaved));
           }
         }
+      } catch (parseError) {
+        throw new Error(`Failed to parse LLM signal output: ${parseError}`);
       }
     } catch (error) {
       if (process.env.NODE_ENV !== 'production') console.warn('[SignalExtractor] LLM failed, using rule-based fallback:', error);

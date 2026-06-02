@@ -3,12 +3,13 @@
 // System continuously discovers leads, enriches them, drafts outreach, and learns from results
 
 import { db } from '@/lib/db';
-import { JobQueue, JobType } from './job-queue';
 import { AgentMemoryService } from './agent-memory';
 import { logger, generateTraceId } from './observability';
 import { selectBestChannel } from './multi-channel';
+import { enqueueJob } from '@/lib/queue/producers';
 
 export interface AutonomyConfig {
+  organizationId?: string;
   maxDailyDiscoveries: number;    // Max new leads to discover per day
   maxDailyEngagements: number;    // Max outreach actions per day
   minLeadScore: number;           // Minimum score to auto-engage
@@ -21,7 +22,7 @@ const DEFAULT_AUTONOMY_CONFIG: AutonomyConfig = {
   maxDailyDiscoveries: 20,
   maxDailyEngagements: 15,
   minLeadScore: 60,
-  autoApproveThreshold: 85,
+  autoApproveThreshold: 100,
   channels: ['email', 'linkedin'],
   discoverySources: ['web_search', 'csv_import'],
 };
@@ -55,6 +56,9 @@ export class AutonomousWorkflowEngine {
     learned: number;
   }> {
     const traceId = generateTraceId();
+    if (!this.config.organizationId) {
+      throw new Error('organizationId is required for autonomous cycles');
+    }
     logger.setTraceId(traceId);
 
     logger.info('Autonomous workflow cycle starting', { traceId, agent: 'AutonomousEngine' });
@@ -114,6 +118,7 @@ export class AutonomousWorkflowEngine {
     // Find leads that are new and haven't been enriched yet
     const newLeads = await db.lead.findMany({
       where: {
+        organizationId: this.config.organizationId,
         status: 'new',
         isBlacklisted: false,
         doNotContact: false,
@@ -123,12 +128,15 @@ export class AutonomousWorkflowEngine {
     });
 
     // Enqueue observe jobs for each new lead
-    let count = 0;
-    for (const lead of newLeads) {
-      await JobQueue.enqueue('signal_intelligence', { leadId: lead.id }, { priority: 3, traceId });
-      await JobQueue.enqueue('scrape', { leadId: lead.id, urls: lead.url ? [lead.url] : [] }, { priority: 4, traceId });
-      count++;
-    }
+    const enqueuePromises = newLeads.map(async (lead) => {
+      await Promise.all([
+        enqueueJob('signal-intelligence', { organizationId: this.config.organizationId!, leadId: lead.id, traceId }),
+        enqueueJob('scrape', { organizationId: this.config.organizationId!, leadId: lead.id, urls: lead.url ? [lead.url] : [], traceId })
+      ]);
+    });
+    
+    await Promise.allSettled(enqueuePromises);
+    const count = newLeads.length;
 
     if (count > 0) {
       logger.info(`Discovered ${count} new leads for processing`, { agent: 'AutonomousEngine', phase: 'discover', traceId, metadata: { count } });
@@ -144,6 +152,7 @@ export class AutonomousWorkflowEngine {
     // Find leads that were recently enriched (status = enriched, no score yet)
     const enrichedLeads = await db.lead.findMany({
       where: {
+        organizationId: this.config.organizationId,
         status: 'enriched',
         leadScore: 0, // Not yet scored
         isBlacklisted: false,
@@ -152,11 +161,12 @@ export class AutonomousWorkflowEngine {
       take: this.config.maxDailyEngagements,
     });
 
-    let count = 0;
-    for (const lead of enrichedLeads) {
-      await JobQueue.enqueue('score', { leadId: lead.id }, { priority: 2, traceId });
-      count++;
-    }
+    const enqueuePromises = enrichedLeads.map((lead) => 
+      enqueueJob('scoring', { organizationId: this.config.organizationId!, leadId: lead.id, traceId })
+    );
+
+    await Promise.allSettled(enqueuePromises);
+    const count = enrichedLeads.length;
 
     return count;
   }
@@ -168,6 +178,7 @@ export class AutonomousWorkflowEngine {
     // Find scored leads that are above the threshold and haven't been generated yet
     const highPriorityLeads = await db.lead.findMany({
       where: {
+        organizationId: this.config.organizationId,
         status: { in: ['enriched', 'scored'] },
         leadScore: { gte: this.config.minLeadScore },
         isBlacklisted: false,
@@ -177,11 +188,15 @@ export class AutonomousWorkflowEngine {
       orderBy: { leadScore: 'desc' },
     });
 
-    let count = 0;
-    for (const lead of highPriorityLeads) {
-      await db.lead.update({ where: { id: lead.id }, data: { status: 'scored' } });
-      count++;
-    }
+    if (highPriorityLeads.length === 0) return 0;
+
+    // Batch update for performance
+    await db.lead.updateMany({
+      where: { id: { in: highPriorityLeads.map(l => l.id) } },
+      data: { status: 'scored' }
+    });
+    
+    const count = highPriorityLeads.length;
 
     return count;
   }
@@ -192,6 +207,7 @@ export class AutonomousWorkflowEngine {
   private async draftOutreach(traceId: string): Promise<number> {
     const leadsToDraft = await db.lead.findMany({
       where: {
+        organizationId: this.config.organizationId,
         status: 'scored',
         leadScore: { gte: this.config.minLeadScore },
         isBlacklisted: false,
@@ -202,15 +218,16 @@ export class AutonomousWorkflowEngine {
       orderBy: { leadScore: 'desc' },
     });
 
-    let count = 0;
-    for (const lead of leadsToDraft) {
-      await JobQueue.enqueue('generate_email', {
+    const enqueuePromises = leadsToDraft.map((lead) => 
+      enqueueJob('draft-email', {
+        organizationId: this.config.organizationId!,
         leadId: lead.id,
-        topSignalType: lead.signals[0]?.type,
-        topUrgency: lead.signals[0]?.urgency,
-      }, { priority: 2, traceId });
-      count++;
-    }
+        traceId,
+      })
+    );
+
+    await Promise.allSettled(enqueuePromises);
+    const count = leadsToDraft.length;
 
     return count;
   }
@@ -223,7 +240,9 @@ export class AutonomousWorkflowEngine {
       // Find messages for leads with very high scores that are still in 'generated' status
       const autoApproveLeads = await db.lead.findMany({
         where: {
+          organizationId: this.config.organizationId,
           leadScore: { gte: this.config.autoApproveThreshold },
+          spamRisk: { lte: 0.25 },
           status: 'generated',
           isBlacklisted: false,
           doNotContact: false,
@@ -234,10 +253,12 @@ export class AutonomousWorkflowEngine {
       let count = 0;
       for (const lead of autoApproveLeads) {
         const generatedMessages = await db.outreachMessage.findMany({
-          where: { leadId: lead.id, status: 'generated', sequencePos: 0 },
+          where: { organizationId: this.config.organizationId, leadId: lead.id, status: 'generated', sequencePos: 0 },
+          include: { campaign: true },
         });
 
         for (const msg of generatedMessages) {
+          if (!msg.campaign?.autoApprovalEnabled) continue;
           await db.outreachMessage.update({
             where: { id: msg.id },
             data: { status: 'approved', approvedAt: new Date(), approvedBy: 'autonomous_engine' },
@@ -258,7 +279,7 @@ export class AutonomousWorkflowEngine {
    */
   private async scheduleSends(traceId: string): Promise<number> {
     const approvedMessages = await db.outreachMessage.findMany({
-      where: { status: 'approved', sequencePos: 0 },
+      where: { organizationId: this.config.organizationId, status: 'approved', sequencePos: 0 },
       include: { lead: true },
       take: this.config.maxDailyEngagements,
     });
@@ -281,12 +302,14 @@ export class AutonomousWorkflowEngine {
         msg.channel as 'email' | 'linkedin' | 'twitter' | 'sms' | 'contact_form',
       );
 
-      await JobQueue.enqueue('send_email', {
+      await enqueueJob('send-email', {
+        organizationId: this.config.organizationId!,
         leadId: msg.leadId,
         messageId: msg.id,
-        channel,
+        campaignId: msg.campaignId || undefined,
         dryRun: false,
-      }, { priority: 1, traceId });
+        traceId,
+      });
       count++;
     }
 
@@ -301,7 +324,7 @@ export class AutonomousWorkflowEngine {
 
     // 1. Learn from recent replies
     const recentReplies = await db.replyClassification.findMany({
-      where: { createdAt: { gte: new Date(Date.now() - 86400000) } },
+      where: { organizationId: this.config.organizationId, createdAt: { gte: new Date(Date.now() - 86400000) } },
       include: { message: { include: { lead: true } } },
     });
 
@@ -368,6 +391,7 @@ export class AutonomousWorkflowEngine {
   private async decayStaleSignals(): Promise<void> {
     const staleSignals = await db.signal.findMany({
       where: {
+        organizationId: this.config.organizationId,
         expiresAt: { lt: new Date() },
         urgency: { gt: 0.1 },
       },

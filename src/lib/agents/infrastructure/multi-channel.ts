@@ -47,7 +47,8 @@ export class EmailChannelAdapter implements ChannelAdapter {
   channel: Channel = 'email';
 
   async canSend(context: AgentContext): Promise<boolean> {
-    const safety = await isLeadSafeToContact(context.leadId);
+    if (!context.organizationId) return false;
+    const safety = await isLeadSafeToContact(context.leadId, context.organizationId);
     if (!safety.safe) return false;
 
     if (context.campaignId) {
@@ -63,6 +64,10 @@ export class EmailChannelAdapter implements ChannelAdapter {
   }
 
   async send(message: ChannelMessage, context: AgentContext): Promise<ChannelSendResult> {
+    if (!context.organizationId) {
+      return { success: false, error: 'Workspace context is required to send email' };
+    }
+
     const canSend = await this.canSend(context);
     if (!canSend) {
       return { success: false, error: 'Cannot send email: safety check failed' };
@@ -94,6 +99,7 @@ export class EmailChannelAdapter implements ChannelAdapter {
 
     // Send via DeliverabilityService (uses Resend under the hood)
     const result = await DeliverabilityService.sendEmail({
+      organizationId: context.organizationId,
       to: context.lead.email,
       from: senderEmail,
       fromName: senderName,

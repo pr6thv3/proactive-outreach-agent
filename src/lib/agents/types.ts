@@ -94,6 +94,7 @@ export type EmailSequence = EmailSequenceItem[];
 
 // ─── Agent Context ────────────────────────────────────
 export interface AgentContext {
+  organizationId?: string;
   leadId: string;
   lead: LeadData;
   signals: SignalData[];
@@ -287,7 +288,7 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
   enableMemoryLearning: true,
   enableAutonomy: false,
   autonomyMinScore: 60,
-  autoApproveThreshold: 85,
+  autoApproveThreshold: 100,
 };
 
 // ─── Observe Phase Output ─────────────────────────────

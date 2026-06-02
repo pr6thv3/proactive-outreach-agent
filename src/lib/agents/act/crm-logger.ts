@@ -27,6 +27,7 @@ export class CRMLoggerAgent extends BaseAgent<CRMLoggerInput, ActOutput> {
       await db.outreachMessage.create({
         data: {
           id: message.id,
+          organizationId: context.organizationId,
           subject: message.subject,
           body: message.body,
           channel: message.channel || 'email',
@@ -57,6 +58,7 @@ export class CRMLoggerAgent extends BaseAgent<CRMLoggerInput, ActOutput> {
           await db.outreachMessage.create({
             data: {
               id: followUpId,
+              organizationId: context.organizationId,
               subject: email.subject,
               body: email.body,
               channel: 'email',
@@ -80,8 +82,8 @@ export class CRMLoggerAgent extends BaseAgent<CRMLoggerInput, ActOutput> {
     // 4. Create activity records
     await db.activity.createMany({
       data: [
-        { type: 'email_generated', description: `Email generated: "${message.subject}"`, phase: 'think', leadId, metadata: JSON.stringify({ messageId: message.id, sequenceLength: (input.emailSequence?.length || 1) }) },
-        { type: 'campaign_assigned', description: `Assigned to campaign`, phase: 'system', leadId, metadata: JSON.stringify({ campaignId: context.campaignId }) },
+        { organizationId: context.organizationId, type: 'email_generated', description: `Email generated: "${message.subject}"`, phase: 'think', leadId, metadata: JSON.stringify({ messageId: message.id, sequenceLength: (input.emailSequence?.length || 1) }) },
+        { organizationId: context.organizationId, type: 'campaign_assigned', description: `Assigned to campaign`, phase: 'system', leadId, metadata: JSON.stringify({ campaignId: context.campaignId }) },
       ],
     });
 

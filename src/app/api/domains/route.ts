@@ -6,10 +6,17 @@ import { db } from '@/lib/db';
 import { DeliverabilityService } from '@/lib/deliverability';
 import { checkDomainDnsStatus } from '@/lib/deliverability/dns-checker';
 import { getWarmupStatus, resetWarmup } from '@/lib/deliverability/warmup-manager';
+import { requireRole, requireWorkspace } from '@/lib/auth/context';
+import { createTraceId, fail, handleApiError, ok } from '@/lib/api/responses';
 
 export async function GET() {
+  const traceId = createTraceId();
   try {
-    const domains = await db.sendingDomain.findMany({ orderBy: { reputationScore: 'desc' } });
+    const context = await requireWorkspace();
+    const domains = await db.sendingDomain.findMany({
+      where: { organizationId: context.organizationId },
+      orderBy: { reputationScore: 'desc' },
+    });
 
     // Enrich with DNS status and warmup info
     const enriched = await Promise.all(domains.map(async (d) => {
@@ -31,22 +38,25 @@ export async function GET() {
       };
     }));
 
-    return NextResponse.json({ success: true, data: enriched });
+    return ok(enriched, traceId);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }
 
 export async function POST(request: NextRequest) {
+  const traceId = createTraceId();
   try {
+    const context = await requireRole('admin');
     const body = await request.json();
     const { domain, fromEmail, fromName, replyTo } = body;
 
     if (!domain || !fromEmail) {
-      return NextResponse.json({ error: 'domain and fromEmail are required' }, { status: 400 });
+      return fail('domain and fromEmail are required', 400, 'validation_error', traceId);
     }
 
     const result = await DeliverabilityService.addDomain({
+      organizationId: context.organizationId,
       domain,
       fromEmail,
       fromName,
@@ -54,70 +64,78 @@ export async function POST(request: NextRequest) {
     });
 
     if (!result.success) {
-      return NextResponse.json({ error: result.error }, { status: 400 });
+      return fail(result.error || 'Failed to add domain', 400, 'domain_error', traceId);
     }
 
-    return NextResponse.json({ success: true, data: { domainId: result.domainId, dnsRecords: result.dnsRecords } });
+    return ok({ domainId: result.domainId, dnsRecords: result.dnsRecords }, traceId, 201);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }
 
 export async function PATCH(request: NextRequest) {
+  const traceId = createTraceId();
   try {
+    const context = await requireRole('admin');
     const body = await request.json();
     const { domainId, action } = body;
 
     if (!domainId || !action) {
-      return NextResponse.json({ error: 'domainId and action are required' }, { status: 400 });
+      return fail('domainId and action are required', 400, 'validation_error', traceId);
     }
+
+    const domain = await db.sendingDomain.findFirst({ where: { id: domainId, organizationId: context.organizationId } });
+    if (!domain) return fail('Domain not found', 404, 'not_found', traceId);
 
     switch (action) {
       case 'verify': {
         const dnsStatus = await DeliverabilityService.verifyDomain(domainId);
-        return NextResponse.json({ success: true, data: dnsStatus });
+        return ok(dnsStatus, traceId);
       }
 
       case 'pause_warmup': {
         await db.sendingDomain.update({ where: { id: domainId }, data: { warmupEnabled: false } });
-        return NextResponse.json({ success: true, data: { warmupEnabled: false } });
+        return ok({ warmupEnabled: false }, traceId);
       }
 
       case 'resume_warmup': {
         await db.sendingDomain.update({ where: { id: domainId }, data: { warmupEnabled: true } });
-        return NextResponse.json({ success: true, data: { warmupEnabled: true } });
+        return ok({ warmupEnabled: true }, traceId);
       }
 
       case 'reset_warmup': {
         await resetWarmup(domainId);
-        return NextResponse.json({ success: true, data: { message: 'Warmup reset to day 0' } });
+        return ok({ message: 'Warmup reset to day 0' }, traceId);
       }
 
       default:
-        return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
+        return fail(`Unknown action: ${action}`, 400, 'unknown_action', traceId);
     }
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const traceId = createTraceId();
   try {
+    const context = await requireRole('admin');
     const body = await request.json();
     const { domainId } = body;
 
     if (!domainId) {
-      return NextResponse.json({ error: 'domainId is required' }, { status: 400 });
+      return fail('domainId is required', 400, 'validation_error', traceId);
     }
 
     // Soft delete — suspend the domain
-    await db.sendingDomain.update({
-      where: { id: domainId },
+    const updated = await db.sendingDomain.updateMany({
+      where: { id: domainId, organizationId: context.organizationId },
       data: { status: 'suspended' },
     });
+    if (updated.count === 0) return fail('Domain not found', 404, 'not_found', traceId);
 
-    return NextResponse.json({ success: true });
+    return ok({ suspended: true }, traceId);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }

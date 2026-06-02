@@ -3,9 +3,13 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { requireWorkspace } from '@/lib/auth/context';
+import { createTraceId, handleApiError, ok } from '@/lib/api/responses';
 
 export async function GET(request: NextRequest) {
+  const traceId = createTraceId();
   try {
+    const context = await requireWorkspace();
     const { searchParams } = new URL(request.url);
     const eventType = searchParams.get('type');
     const domainId = searchParams.get('domainId');
@@ -18,6 +22,7 @@ export async function GET(request: NextRequest) {
 
     // Build where clause
     const where: Record<string, unknown> = {
+      organizationId: context.organizationId,
       createdAt: { gte: since },
     };
     if (eventType) where.eventType = eventType;
@@ -34,7 +39,7 @@ export async function GET(request: NextRequest) {
 
     // Aggregate counts by event type
     const allEvents = await db.emailEvent.findMany({
-      where: { createdAt: { gte: since } },
+      where: { organizationId: context.organizationId, createdAt: { gte: since } },
       select: { eventType: true, createdAt: true },
     });
 
@@ -68,9 +73,7 @@ export async function GET(request: NextRequest) {
       .map(([date, typeCounts]) => ({ date, ...typeCounts }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    return NextResponse.json({
-      success: true,
-      data: {
+    return ok({
         events,
         aggregation: {
           counts,
@@ -88,9 +91,8 @@ export async function GET(request: NextRequest) {
           complaintRate,
         },
         dailyTrend: trend,
-      },
-    });
+      }, traceId);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }

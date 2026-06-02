@@ -23,7 +23,7 @@ export class LeadIngestionAgent extends BaseAgent<LeadIngestionInput, LeadIngest
   readonly phase = 'observe' as const;
   readonly description = 'Ingests leads with CSV support, validation, dedup, and DNC checks';
 
-  async execute(input: LeadIngestionInput, _context: AgentContext): Promise<LeadIngestionResult> {
+  async execute(input: LeadIngestionInput, context: AgentContext): Promise<LeadIngestionResult> {
     const result: LeadIngestionResult = { created: 0, updated: 0, skipped: 0, dncBlocked: 0, leads: [], errors: [] };
     const source = input.source || 'manual';
 
@@ -43,7 +43,7 @@ export class LeadIngestionAgent extends BaseAgent<LeadIngestionInput, LeadIngest
       }
 
       // 2. Check DNC list
-      const onDnc = await isOnDncList(email);
+      const onDnc = await isOnDncList(email, context.organizationId);
       if (onDnc) {
         result.dncBlocked++;
         result.errors.push({ email, reason: 'On Do-Not-Contact list' });
@@ -51,7 +51,12 @@ export class LeadIngestionAgent extends BaseAgent<LeadIngestionInput, LeadIngest
       }
 
       // 3. Check for existing lead (dedup)
-      const existing = await db.lead.findUnique({ where: { email } });
+      const existing = await db.lead.findFirst({
+        where: {
+          email,
+          ...(context.organizationId ? { organizationId: context.organizationId } : {}),
+        },
+      });
 
       if (existing) {
         // Update with any new information
@@ -77,6 +82,7 @@ export class LeadIngestionAgent extends BaseAgent<LeadIngestionInput, LeadIngest
         const newLead = await db.lead.create({
           data: {
             name: leadData.name.trim(),
+            organizationId: context.organizationId,
             email,
             company: leadData.company?.trim() || null,
             title: leadData.title?.trim() || null,
@@ -95,6 +101,7 @@ export class LeadIngestionAgent extends BaseAgent<LeadIngestionInput, LeadIngest
           await db.signal.create({
             data: {
               type: 'trigger',
+              organizationId: context.organizationId,
               content: `New lead from ${leadData.company}${leadData.title ? ` — ${leadData.title}` : ''}`,
               source: 'lead_ingestion',
               relevance: 0.6,
@@ -108,6 +115,7 @@ export class LeadIngestionAgent extends BaseAgent<LeadIngestionInput, LeadIngest
         await db.activity.create({
           data: {
             type: 'lead_created',
+            organizationId: context.organizationId,
             description: `Lead created from ${source}: ${newLead.name} at ${newLead.company || 'N/A'}`,
             phase: 'system',
             leadId: newLead.id,

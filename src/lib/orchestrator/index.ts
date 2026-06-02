@@ -462,8 +462,9 @@ export class Orchestrator {
   }
 
   // ─── Run Autonomous Cycle ──────────────────────────
-  async runAutonomousCycle(): Promise<AutonomousCycleResult> {
+  async runAutonomousCycle(organizationId?: string): Promise<AutonomousCycleResult> {
     const engine = new AutonomousWorkflowEngine({
+      organizationId,
       minLeadScore: this.config.autonomyMinScore,
       autoApproveThreshold: this.config.autoApproveThreshold,
       channels: this.config.channels as string[],
@@ -512,6 +513,7 @@ export class Orchestrator {
     }
 
     return {
+      organizationId: lead.organizationId || undefined,
       leadId,
       lead: mapLead(lead),
       signals: signals.map(mapSignal),
@@ -526,7 +528,7 @@ export class Orchestrator {
   }
 }
 
-function mapLead(l: { id: string; name: string; email: string; company: string | null; title: string | null; url: string | null; linkedinUrl: string | null; status: string; source: string; emailVerified: boolean; isBlacklisted: boolean; doNotContact: boolean; lastContacted: Date | null; notes: string | null; leadScore: number | null; signalScore: number | null; replyProb: number | null; conversionProb: number | null; spamRisk: number | null; priorityTier: string | null; autonomyEnabled: boolean | null; nextActionAt: Date | null }): LeadData {
+function mapLead(l: { id: string; name: string; email: string; company: string | null; title: string | null; url: string | null; linkedinUrl: string | null; status: string; source: string; emailVerified: boolean; isBlacklisted: boolean; doNotContact: boolean; lastContacted: Date | null; notes: string | null; leadScore: number | null; signalScore: number | null; replyProb: number | null; conversionProb: number | null; spamRisk: number | null; priorityTier: string | null; autonomyEnabled: boolean | null; nextActionAt: Date | null; organizationId?: string | null }): LeadData {
   return {
     id: l.id, name: l.name, email: l.email,
     company: l.company || undefined, title: l.title || undefined,

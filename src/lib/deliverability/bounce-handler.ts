@@ -9,6 +9,7 @@ import { logger } from '@/lib/agents/infrastructure/observability';
 export type BounceClassification = 'hard' | 'soft' | 'feedback' | 'unknown';
 
 export interface BounceEvent {
+  organizationId?: string;
   recipient: string;
   bounceType?: string;       // hard, soft, feedback
   bounceReason?: string;
@@ -69,6 +70,7 @@ export async function handleBounce(event: BounceEvent): Promise<void> {
   await db.emailEvent.create({
     data: {
       eventType: 'bounced',
+      organizationId: event.organizationId,
       providerId: event.providerId,
       recipient: event.recipient,
       bounceType: classification,
@@ -129,7 +131,7 @@ async function handleHardBounce(event: BounceEvent): Promise<void> {
   });
 
   // Add to Do Not Contact list
-  await addToDncList(event.recipient, 'Hard bounce', 'bounce_notification', event.leadId || undefined);
+  await addToDncList(event.recipient, 'Hard bounce', 'bounce_notification', event.leadId || undefined, event.organizationId);
 
   // Blacklist the lead
   if (event.leadId) {
@@ -140,7 +142,7 @@ async function handleHardBounce(event: BounceEvent): Promise<void> {
 
     // Cancel any pending follow-ups
     const pendingMessages = await db.outreachMessage.findMany({
-      where: { leadId: event.leadId, status: { in: ['generated', 'approved'] } },
+      where: { organizationId: event.organizationId, leadId: event.leadId, status: { in: ['generated', 'approved'] } },
     });
 
     for (const msg of pendingMessages) {
@@ -160,6 +162,7 @@ async function handleHardBounce(event: BounceEvent): Promise<void> {
     await db.activity.create({
       data: {
         type: 'lead_blacklisted',
+        organizationId: event.organizationId,
         description: `Lead blacklisted: hard bounce (${event.bounceReason?.slice(0, 100)})`,
         phase: 'act',
         leadId: event.leadId,
@@ -187,7 +190,7 @@ async function handleSoftBounce(event: BounceEvent): Promise<void> {
       metadata: { recipient: event.recipient, retries: retryCount },
     });
 
-    await addToDncList(event.recipient, 'Soft bounce (3+ retries)', 'bounce_notification', event.leadId || undefined);
+    await addToDncList(event.recipient, 'Soft bounce (3+ retries)', 'bounce_notification', event.leadId || undefined, event.organizationId);
 
     if (event.leadId) {
       await db.lead.update({
@@ -211,13 +214,16 @@ async function handleSoftBounce(event: BounceEvent): Promise<void> {
   // Create a job for the retry
   await db.jobQueue.create({
     data: {
-      type: 'send_email',
+      organizationId: event.organizationId,
+      queueName: 'send-email',
+      type: 'send-email',
       priority: 7, // Lower priority than fresh sends
       payload: JSON.stringify({
         messageId: event.messageId,
         leadId: event.leadId,
         campaignId: event.campaignId,
         retryAttempt: retryCount,
+        organizationId: event.organizationId,
       }),
       leadId: event.leadId,
       campaignId: event.campaignId,
@@ -229,6 +235,7 @@ async function handleSoftBounce(event: BounceEvent): Promise<void> {
     await db.activity.create({
       data: {
         type: 'email_blocked',
+        organizationId: event.organizationId,
         description: `Soft bounce — retry scheduled in ${retryDelayHours}h (attempt ${retryCount}/3)`,
         phase: 'act',
         leadId: event.leadId,
@@ -250,7 +257,7 @@ async function handleComplaint(event: BounceEvent): Promise<void> {
   });
 
   // Immediately add to DNC
-  await addToDncList(event.recipient, 'Spam complaint', 'bounce_notification', event.leadId || undefined);
+  await addToDncList(event.recipient, 'Spam complaint', 'bounce_notification', event.leadId || undefined, event.organizationId);
 
   // Mark lead as unsubscribed
   if (event.leadId) {
@@ -261,7 +268,7 @@ async function handleComplaint(event: BounceEvent): Promise<void> {
 
     // Cancel all pending messages and follow-ups
     await db.outreachMessage.updateMany({
-      where: { leadId: event.leadId, status: { in: ['generated', 'approved'] } },
+      where: { organizationId: event.organizationId, leadId: event.leadId, status: { in: ['generated', 'approved'] } },
       data: { status: 'bounced' },
     });
 
@@ -280,6 +287,7 @@ async function handleComplaint(event: BounceEvent): Promise<void> {
     await db.activity.create({
       data: {
         type: 'lead_unsubscribed',
+        organizationId: event.organizationId,
         description: 'Lead submitted spam complaint — added to DNC',
         phase: 'act',
         leadId: event.leadId,
@@ -296,6 +304,7 @@ async function handleComplaint(event: BounceEvent): Promise<void> {
   await db.emailEvent.create({
     data: {
       eventType: 'complained',
+      organizationId: event.organizationId,
       providerId: event.providerId,
       recipient: event.recipient,
       complaintType: 'abuse',
@@ -312,6 +321,7 @@ async function handleComplaint(event: BounceEvent): Promise<void> {
  * Handle an unsubscribe event from webhook
  */
 export async function handleUnsubscribe(params: {
+  organizationId?: string;
   recipient: string;
   messageId?: string;
   leadId?: string;
@@ -319,7 +329,7 @@ export async function handleUnsubscribe(params: {
   domainId?: string;
   providerId?: string;
 }): Promise<void> {
-  await addToDncList(params.recipient, 'Unsubscribed via email', 'bounce_notification', params.leadId);
+  await addToDncList(params.recipient, 'Unsubscribed via email', 'bounce_notification', params.leadId, params.organizationId);
 
   if (params.leadId) {
     await db.lead.update({
@@ -329,13 +339,14 @@ export async function handleUnsubscribe(params: {
 
     // Cancel pending sequences
     await db.outreachMessage.updateMany({
-      where: { leadId: params.leadId, status: { in: ['generated', 'approved'] } },
+      where: { organizationId: params.organizationId, leadId: params.leadId, status: { in: ['generated', 'approved'] } },
       data: { status: 'bounced' },
     });
 
     await db.activity.create({
       data: {
         type: 'lead_unsubscribed',
+        organizationId: params.organizationId,
         description: 'Lead unsubscribed via email',
         phase: 'act',
         leadId: params.leadId,
@@ -346,6 +357,7 @@ export async function handleUnsubscribe(params: {
   await db.emailEvent.create({
     data: {
       eventType: 'unsubscribed',
+      organizationId: params.organizationId,
       providerId: params.providerId,
       recipient: params.recipient,
       messageId: params.messageId,

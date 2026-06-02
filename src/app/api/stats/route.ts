@@ -5,9 +5,14 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { JobQueue } from '@/lib/agents/infrastructure/job-queue';
 import { getPipelineMetrics } from '@/lib/agents/infrastructure/observability';
+import { requireWorkspace } from '@/lib/auth/context';
+import { createTraceId, handleApiError, ok } from '@/lib/api/responses';
 
 export async function GET() {
+  const traceId = createTraceId();
   try {
+    const context = await requireWorkspace();
+    const organizationId = context.organizationId;
     const [
       totalLeads, newLeads, enrichedLeads, scoredLeads, generatedLeads, approvedLeads, sentLeads,
       interestedLeads, negativeLeads, unsubscribedLeads,
@@ -16,58 +21,59 @@ export async function GET() {
       totalSignals, totalFollowUps, scheduledFollowUps, totalDnc,
       recentActivities, recentPipelineRuns,
     ] = await Promise.all([
-      db.lead.count({ where: { isBlacklisted: false } }),
-      db.lead.count({ where: { status: 'new', isBlacklisted: false } }),
-      db.lead.count({ where: { status: 'enriched' } }),
-      db.lead.count({ where: { status: 'scored' } }),
-      db.lead.count({ where: { status: 'generated' } }),
-      db.lead.count({ where: { status: 'approved' } }),
-      db.lead.count({ where: { status: 'sent' } }),
-      db.lead.count({ where: { status: 'interested' } }),
-      db.lead.count({ where: { status: 'negative' } }),
-      db.lead.count({ where: { status: 'unsubscribed' } }),
-      db.lead.count({ where: { priorityTier: 'hot', isBlacklisted: false } }),
-      db.lead.count({ where: { priorityTier: 'warm', isBlacklisted: false } }),
-      db.lead.count({ where: { priorityTier: 'cold', isBlacklisted: false } }),
-      db.outreachMessage.count(),
-      db.outreachMessage.count({ where: { status: 'draft' } }),
-      db.outreachMessage.count({ where: { status: 'generated' } }),
-      db.outreachMessage.count({ where: { status: 'approved' } }),
-      db.outreachMessage.count({ where: { status: 'sent' } }),
-      db.outreachMessage.count({ where: { status: 'replied' } }),
-      db.signal.count(),
-      db.followUp.count(),
-      db.followUp.count({ where: { status: 'scheduled' } }),
-      db.doNotContact.count(),
-      db.activity.findMany({ orderBy: { createdAt: 'desc' }, take: 30, include: { lead: { select: { name: true, company: true } } } }),
-      db.pipelineRun.findMany({ orderBy: { createdAt: 'desc' }, take: 10, select: { id: true, phase: true, status: true, agentName: true, durationMs: true, createdAt: true, leadId: true, error: true, traceId: true } }),
+      db.lead.count({ where: { organizationId, isBlacklisted: false } }),
+      db.lead.count({ where: { organizationId, status: 'new', isBlacklisted: false } }),
+      db.lead.count({ where: { organizationId, status: 'enriched' } }),
+      db.lead.count({ where: { organizationId, status: 'scored' } }),
+      db.lead.count({ where: { organizationId, status: 'generated' } }),
+      db.lead.count({ where: { organizationId, status: 'approved' } }),
+      db.lead.count({ where: { organizationId, status: 'sent' } }),
+      db.lead.count({ where: { organizationId, status: 'interested' } }),
+      db.lead.count({ where: { organizationId, status: 'negative' } }),
+      db.lead.count({ where: { organizationId, status: 'unsubscribed' } }),
+      db.lead.count({ where: { organizationId, priorityTier: 'hot', isBlacklisted: false } }),
+      db.lead.count({ where: { organizationId, priorityTier: 'warm', isBlacklisted: false } }),
+      db.lead.count({ where: { organizationId, priorityTier: 'cold', isBlacklisted: false } }),
+      db.outreachMessage.count({ where: { organizationId } }),
+      db.outreachMessage.count({ where: { organizationId, status: 'draft' } }),
+      db.outreachMessage.count({ where: { organizationId, status: 'generated' } }),
+      db.outreachMessage.count({ where: { organizationId, status: 'approved' } }),
+      db.outreachMessage.count({ where: { organizationId, status: 'sent' } }),
+      db.outreachMessage.count({ where: { organizationId, status: 'replied' } }),
+      db.signal.count({ where: { organizationId } }),
+      db.followUp.count({ where: { organizationId } }),
+      db.followUp.count({ where: { organizationId, status: 'scheduled' } }),
+      db.doNotContact.count({ where: { organizationId } }),
+      db.activity.findMany({ where: { organizationId }, orderBy: { createdAt: 'desc' }, take: 30, include: { lead: { select: { name: true, company: true } } } }),
+      db.pipelineRun.findMany({ where: { organizationId }, orderBy: { createdAt: 'desc' }, take: 10, select: { id: true, phase: true, status: true, agentName: true, durationMs: true, createdAt: true, leadId: true, error: true, traceId: true } }),
     ]);
 
     const responseRate = sentMessages > 0 ? ((repliedMessages / sentMessages) * 100).toFixed(1) : '0';
     const interestRate = totalLeads > 0 ? ((interestedLeads / totalLeads) * 100).toFixed(1) : '0';
 
     // Signal breakdown by type
-    const signalBreakdown = await db.signal.groupBy({ by: ['type'], _count: { type: true }, orderBy: { _count: { type: 'desc' } } });
+    const signalBreakdown = await db.signal.groupBy({ by: ['type'], where: { organizationId }, _count: { type: true }, orderBy: { _count: { type: 'desc' } } });
 
     // Signal urgency distribution
-    const highUrgencySignals = await db.signal.count({ where: { urgency: { gte: 0.7 } } });
-    const medUrgencySignals = await db.signal.count({ where: { urgency: { gte: 0.4, lt: 0.7 } } });
-    const lowUrgencySignals = await db.signal.count({ where: { urgency: { lt: 0.4 } } });
+    const highUrgencySignals = await db.signal.count({ where: { organizationId, urgency: { gte: 0.7 } } });
+    const medUrgencySignals = await db.signal.count({ where: { organizationId, urgency: { gte: 0.4, lt: 0.7 } } });
+    const lowUrgencySignals = await db.signal.count({ where: { organizationId, urgency: { lt: 0.4 } } });
 
     // Top signals by urgency
     const topSignals = await db.signal.findMany({
-      where: { urgency: { gt: 0 } },
+      where: { organizationId, urgency: { gt: 0 } },
       orderBy: { urgency: 'desc' },
       take: 10,
       include: { lead: { select: { name: true, company: true, priorityTier: true } } },
     });
 
     // Channel distribution
-    const channelBreakdown = await db.outreachMessage.groupBy({ by: ['channel'], _count: { channel: true } });
+    const channelBreakdown = await db.outreachMessage.groupBy({ by: ['channel'], where: { organizationId }, _count: { channel: true } });
 
     // Memory stats
     const memoryStats = await db.agentMemory.groupBy({
       by: ['category'],
+      where: { organizationId },
       _count: { category: true },
       _avg: { score: true },
     });
@@ -76,25 +82,34 @@ export async function GET() {
     const scoreStats = await db.lead.aggregate({
       _avg: { leadScore: true, signalScore: true, replyProb: true, conversionProb: true, spamRisk: true },
       _max: { leadScore: true },
-      where: { isBlacklisted: false },
+      where: { organizationId, isBlacklisted: false },
     });
 
     // Queue stats
     let queueStats;
-    try { queueStats = await JobQueue.getStats(); } catch { queueStats = { pending: 0, running: 0, completed: 0, failed: 0, dead: 0, byType: {} }; }
+    try {
+      const [pending, running, completed, failed, dead, byType] = await Promise.all([
+        db.jobQueue.count({ where: { organizationId, status: 'pending' } }),
+        db.jobQueue.count({ where: { organizationId, status: 'running' } }),
+        db.jobQueue.count({ where: { organizationId, status: 'completed' } }),
+        db.jobQueue.count({ where: { organizationId, status: 'failed' } }),
+        db.jobQueue.count({ where: { organizationId, status: 'dead' } }),
+        db.jobQueue.groupBy({ by: ['type'], _count: { type: true }, where: { organizationId, status: { in: ['pending', 'running'] } } }),
+      ]);
+      queueStats = { pending, running, completed, failed, dead, byType: Object.fromEntries(byType.map(b => [b.type, b._count.type])) };
+    } catch { queueStats = { pending: 0, running: 0, completed: 0, failed: 0, dead: 0, byType: {} }; }
 
     // Pipeline metrics (last 24h)
     let pipelineMetrics;
     try { pipelineMetrics = await getPipelineMetrics(24); } catch { pipelineMetrics = []; }
 
     const campaigns = await db.campaign.findMany({
+      where: { organizationId },
       include: { _count: { select: { messages: true } } },
       orderBy: { createdAt: 'desc' },
     });
 
-    return NextResponse.json({
-      success: true,
-      data: {
+    return ok({
         leads: {
           total: totalLeads, new: newLeads, enriched: enrichedLeads, scored: scoredLeads,
           generated: generatedLeads, approved: approvedLeads, sent: sentLeads,
@@ -136,28 +151,28 @@ export async function GET() {
         pipelineMetrics,
 
         // ─── Deliverability & Results Metrics ───
-        deliverability: await getDeliverabilityStats(),
-        results: await getResultsMetrics(),
+        deliverability: await getDeliverabilityStats(organizationId),
+        results: await getResultsMetrics(organizationId),
       },
-    });
+    traceId);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }
 
-async function getDeliverabilityStats() {
+async function getDeliverabilityStats(organizationId: string) {
   try {
-    const domains = await db.sendingDomain.findMany({ orderBy: { reputationScore: 'desc' } });
+    const domains = await db.sendingDomain.findMany({ where: { organizationId }, orderBy: { reputationScore: 'desc' } });
 
     const [
       eventsSent, eventsDelivered, eventsBounced, eventsOpened, eventsClicked, eventsComplained,
     ] = await Promise.all([
-      db.emailEvent.count({ where: { eventType: 'sent' } }),
-      db.emailEvent.count({ where: { eventType: 'delivered' } }),
-      db.emailEvent.count({ where: { eventType: 'bounced' } }),
-      db.emailEvent.count({ where: { eventType: 'opened' } }),
-      db.emailEvent.count({ where: { eventType: 'clicked' } }),
-      db.emailEvent.count({ where: { eventType: 'complained' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'sent' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'delivered' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'bounced' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'opened' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'clicked' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'complained' } }),
     ]);
 
     const deliveryRate = eventsSent > 0 ? eventsDelivered / eventsSent : 0;
@@ -202,7 +217,7 @@ async function getDeliverabilityStats() {
   }
 }
 
-async function getResultsMetrics() {
+async function getResultsMetrics(organizationId: string) {
   try {
     // The RESULTS LOOP: signals found → emails generated → emails sent → replies → meetings → revenue
     const [
@@ -214,13 +229,13 @@ async function getResultsMetrics() {
       interestedLeads,
       meetingsBooked,
     ] = await Promise.all([
-      db.signal.count(),
-      db.outreachMessage.count({ where: { status: { in: ['generated', 'approved', 'sent', 'delivered', 'replied'] } } }),
-      db.emailEvent.count({ where: { eventType: 'sent' } }),
-      db.emailEvent.count({ where: { eventType: 'delivered' } }),
-      db.outreachMessage.count({ where: { status: 'replied' } }),
-      db.lead.count({ where: { status: 'interested' } }),
-      db.replyClassification.count({ where: { nextAction: 'escalate' } }),
+      db.signal.count({ where: { organizationId } }),
+      db.outreachMessage.count({ where: { organizationId, status: { in: ['generated', 'approved', 'sent', 'delivered', 'replied'] } } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'sent' } }),
+      db.emailEvent.count({ where: { organizationId, eventType: 'delivered' } }),
+      db.outreachMessage.count({ where: { organizationId, status: 'replied' } }),
+      db.lead.count({ where: { organizationId, status: 'interested' } }),
+      db.replyClassification.count({ where: { organizationId, nextAction: 'escalate' } }),
     ]);
 
     const replyRate = emailsDelivered > 0 ? (repliesReceived / emailsDelivered) : 0;

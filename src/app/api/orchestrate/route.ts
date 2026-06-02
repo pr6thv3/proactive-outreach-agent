@@ -1,294 +1,392 @@
-// ─── API: Orchestrate ─────────────────────────────────
-// Production orchestration endpoints with Signal Intelligence, Scoring, Memory, Autonomy
-
-import { NextRequest, NextResponse } from 'next/server';
-import { orchestrator } from '@/lib/orchestrator';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
 import { db } from '@/lib/db';
-import { validateEmail, isOnDncList, parseCsv } from '@/lib/safety';
-import { AutonomousWorkflowEngine } from '@/lib/agents/infrastructure/autonomous-engine';
-import { AgentMemoryService } from '@/lib/agents/infrastructure/agent-memory';
-import { JobQueue } from '@/lib/agents/infrastructure/job-queue';
+import { ApiAuthError, hasRole, requireWorkspace, UserContext, WorkspaceRole } from '@/lib/auth/context';
+import { createTraceId, fail, handleApiError, ok } from '@/lib/api/responses';
+import { validateEmail, isOnDncList } from '@/lib/safety';
+import { enqueueJob } from '@/lib/queue/producers';
+import { importCsvAction, ImportCsvSchema } from '@/app/api/orchestrate/actions/import-csv';
+import { runPipelineAction, RunPipelineSchema } from '@/app/api/orchestrate/actions/run-pipeline';
+import { approveMessageAction, ApproveMessageSchema } from '@/app/api/orchestrate/actions/approve-message';
+import { sendMessageAction, SendMessageSchema } from '@/app/api/orchestrate/actions/send-message';
+import { classifyReplyAction, ClassifyReplySchema } from '@/app/api/orchestrate/actions/classify-reply';
+import { startAutonomousCycleAction, StartAutonomousCycleSchema } from '@/app/api/orchestrate/actions/start-autonomous-cycle';
+
+const AddLeadSchema = z.object({
+  action: z.literal('add_lead'),
+  name: z.string().min(1),
+  email: z.string().email(),
+  company: z.string().optional(),
+  title: z.string().optional(),
+  url: z.string().optional(),
+  linkedinUrl: z.string().optional(),
+  autonomyEnabled: z.boolean().optional(),
+});
+
+const AddSampleDataSchema = z.object({
+  action: z.literal('add_sample_data'),
+});
+
+const RunObserveSchema = z.object({
+  action: z.enum(['run_observe', 'run_signal_intelligence']),
+  leadId: z.string().min(1),
+  urls: z.array(z.string()).optional(),
+});
+
+const RunThinkSchema = z.object({
+  action: z.enum(['run_think', 'generate_email']),
+  leadId: z.string().min(1),
+  campaignId: z.string().optional(),
+  objective: z.string().optional(),
+});
+
+const BatchGenerateSchema = z.object({
+  action: z.literal('batch_generate'),
+  leadIds: z.array(z.string().min(1)).min(1),
+  campaignId: z.string().optional(),
+});
+
+const EnableAutonomySchema = z.object({
+  action: z.literal('enable_autonomy'),
+  leadId: z.string().optional(),
+  campaignId: z.string().optional(),
+}).refine(input => input.leadId || input.campaignId, {
+  message: 'leadId or campaignId is required',
+});
+
+const ActionSchema = z.union([
+  AddLeadSchema,
+  AddSampleDataSchema,
+  ImportCsvSchema,
+  RunObserveSchema,
+  RunThinkSchema,
+  RunPipelineSchema,
+  BatchGenerateSchema,
+  ApproveMessageSchema,
+  SendMessageSchema,
+  ClassifyReplySchema,
+  StartAutonomousCycleSchema,
+  EnableAutonomySchema,
+]);
+
+type OrchestrateAction = z.infer<typeof ActionSchema>;
+
+const ACTION_ROLES: Record<OrchestrateAction['action'], WorkspaceRole> = {
+  add_lead: 'member',
+  add_sample_data: 'member',
+  import_csv: 'member',
+  run_observe: 'member',
+  run_signal_intelligence: 'member',
+  run_think: 'member',
+  generate_email: 'member',
+  run_full_pipeline: 'member',
+  run_pipeline: 'member',
+  batch_generate: 'member',
+  approve_message: 'member',
+  send_message: 'member',
+  classify_reply: 'member',
+  run_reeval: 'member',
+  start_autonomous_cycle: 'admin',
+  run_autonomous_cycle: 'admin',
+  enable_autonomy: 'admin',
+};
 
 export async function POST(request: NextRequest) {
+  const traceId = createTraceId();
   try {
-    const body = await request.json();
-    const { action } = body;
+    const context = await requireWorkspace();
+    const raw = await request.json();
+    const parsed = ActionSchema.safeParse(raw);
 
-    switch (action) {
-      case 'run_observe': {
-        const { leadId } = body;
-        if (!leadId) return NextResponse.json({ error: 'leadId required' }, { status: 400 });
-        const result = await orchestrator.runObserve(leadId, body.urls);
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      case 'run_think': {
-        const { leadId, campaignId, objective } = body;
-        if (!leadId) return NextResponse.json({ error: 'leadId required' }, { status: 400 });
-        const result = await orchestrator.runThink(leadId, campaignId, objective);
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      case 'run_full_pipeline': {
-        const { leadId, campaignId, objective } = body;
-        if (!leadId) return NextResponse.json({ error: 'leadId required' }, { status: 400 });
-        const result = await orchestrator.runFullPipeline(leadId, { campaignId, objective });
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      case 'batch_generate': {
-        const { leadIds, campaignId } = body;
-        if (!leadIds?.length) return NextResponse.json({ error: 'leadIds required' }, { status: 400 });
-        const results = await orchestrator.batchGenerate(leadIds, campaignId);
-        return NextResponse.json({ success: true, data: results });
-      }
-
-      case 'approve_message': {
-        const { messageId, editedSubject, editedBody } = body;
-        if (!messageId) return NextResponse.json({ error: 'messageId required' }, { status: 400 });
-        const result = await orchestrator.approveMessage(messageId, editedSubject, editedBody);
-        return NextResponse.json(result);
-      }
-
-      case 'send_message': {
-        const { messageId, dryRun } = body;
-        if (!messageId) return NextResponse.json({ error: 'messageId required' }, { status: 400 });
-        const result = await orchestrator.sendMessage(messageId, dryRun === true); // Only dry run if explicitly true
-        return NextResponse.json({ success: result.success, data: result });
-      }
-
-      case 'run_reeval': {
-        const { leadId, messageId, replyText } = body;
-        if (!leadId || !messageId || !replyText) return NextResponse.json({ error: 'leadId, messageId, replyText required' }, { status: 400 });
-        const result = await orchestrator.runReEval(leadId, messageId, replyText);
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      case 'add_lead': {
-        const { name, email, company, title, url, linkedinUrl, autonomyEnabled } = body;
-        if (!name || !email) return NextResponse.json({ error: 'name and email required' }, { status: 400 });
-        const emailCheck = validateEmail(email);
-        if (!emailCheck.valid) return NextResponse.json({ error: `Invalid email: ${emailCheck.reason}` }, { status: 400 });
-        const onDnc = await isOnDncList(email);
-        if (onDnc) return NextResponse.json({ error: 'Email is on Do-Not-Contact list' }, { status: 403 });
-        const existing = await db.lead.findUnique({ where: { email: email.trim().toLowerCase() } });
-        if (existing) return NextResponse.json({ error: 'Lead with this email already exists', data: existing }, { status: 409 });
-        const lead = await db.lead.create({
-          data: {
-            name: name.trim(), email: email.trim().toLowerCase(), company, title, url, linkedinUrl,
-            source: 'manual', status: 'new', emailVerified: false, isBlacklisted: false, doNotContact: false,
-            autonomyEnabled: autonomyEnabled || false,
-          },
-        });
-        await db.activity.create({ data: { type: 'lead_created', description: `Lead created: ${name}`, phase: 'system', leadId: lead.id } });
-        return NextResponse.json({ success: true, data: lead });
-      }
-
-      case 'import_csv': {
-        const { csvText, source } = body;
-        if (!csvText) return NextResponse.json({ error: 'csvText required' }, { status: 400 });
-        const result = await orchestrator.importCsv(csvText, source || 'csv_import');
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      // ─── NEW: Signal Intelligence ──────────────────
-      case 'run_signal_intelligence': {
-        const { leadId } = body;
-        if (!leadId) return NextResponse.json({ error: 'leadId required' }, { status: 400 });
-        // Run observe which includes signal intelligence
-        const result = await orchestrator.runObserve(leadId, body.urls);
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      // ─── NEW: Score Lead ───────────────────────────
-      case 'score_lead': {
-        const { leadId, forceRescore } = body;
-        if (!leadId) return NextResponse.json({ error: 'leadId required' }, { status: 400 });
-        const { ScoringEngine } = await import('@/lib/agents/think/scoring-engine');
-        const engine = new ScoringEngine();
-        const context = await (orchestrator as unknown as { buildContext: (id: string) => Promise<unknown> }).buildContext?.(leadId);
-        if (!context) return NextResponse.json({ error: 'Lead not found' }, { status: 404 });
-        const result = await engine.run({ forceRescore }, context as Parameters<typeof engine.run>[1]);
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      // ─── NEW: Enable Autonomy for Lead ─────────────
-      case 'enable_autonomy': {
-        const { leadId, campaignId } = body;
-        if (!leadId && !campaignId) return NextResponse.json({ error: 'leadId or campaignId required' }, { status: 400 });
-
-        if (campaignId) {
-          const count = await AutonomousWorkflowEngine.enableForCampaign(campaignId);
-          return NextResponse.json({ success: true, data: { enabled: count, type: 'campaign' } });
-        }
-
-        await AutonomousWorkflowEngine.enableForLead(leadId);
-        return NextResponse.json({ success: true, data: { enabled: 1, type: 'lead' } });
-      }
-
-      // ─── NEW: Run Autonomous Cycle ─────────────────
-      case 'run_autonomous_cycle': {
-        const result = await orchestrator.runAutonomousCycle();
-        return NextResponse.json({ success: true, data: result });
-      }
-
-      // ─── NEW: Get Memory Recommendations ───────────
-      case 'get_memory_recommendations': {
-        const { industry, persona, channel } = body;
-        const recommendations = await orchestrator.getMemoryRecommendations({ industry, persona, channel });
-        return NextResponse.json({ success: true, data: recommendations });
-      }
-
-      // ─── NEW: Get Queue Stats ──────────────────────
-      case 'get_queue_stats': {
-        const stats = await orchestrator.getQueueStats();
-        return NextResponse.json({ success: true, data: stats });
-      }
-
-      // ─── NEW: Process Queue Jobs ───────────────────
-      case 'process_queue': {
-        const { limit = 5 } = body;
-        const jobs = await JobQueue.dequeue(limit);
-        const results: Array<{ jobId: string; type: string; success: boolean; error?: string }> = [];
-
-        for (const job of jobs) {
-          try {
-            // Process each job based on type
-            let result;
-            switch (job.type) {
-              case 'scrape':
-                result = await orchestrator.runObserve(job.payload.leadId!, job.payload.urls as string[]);
-                break;
-              case 'signal_intelligence':
-              case 'signal_extract':
-                result = await orchestrator.runObserve(job.payload.leadId!);
-                break;
-              case 'score':
-                // Score is handled within runObserve now
-                result = await orchestrator.runObserve(job.payload.leadId!);
-                break;
-              case 'generate_email':
-                result = await orchestrator.runThink(job.payload.leadId!, job.payload.campaignId as string);
-                break;
-              case 'send_email':
-                result = await orchestrator.sendMessage(job.payload.messageId as string, job.payload.dryRun as boolean);
-                break;
-              default:
-                result = { success: false, error: `Unknown job type: ${job.type}` };
-            }
-
-            await JobQueue.complete(job.id, {
-              success: result?.success ?? false,
-              data: result?.data ? JSON.parse(JSON.stringify(result.data, null, 2)) : undefined,
-            });
-            results.push({ jobId: job.id, type: job.type, success: true });
-          } catch (error) {
-            await JobQueue.fail(job.id, error instanceof Error ? error.message : String(error));
-            results.push({ jobId: job.id, type: job.type, success: false, error: error instanceof Error ? error.message : String(error) });
-          }
-        }
-
-        return NextResponse.json({ success: true, data: { processed: results } });
-      }
-
-      case 'add_sample_data': {
-        const leads = [
-          { name: 'Sarah Chen', email: 'sarah.chen@techcorp.io', company: 'TechCorp', title: 'VP of Engineering', url: 'https://techcorp.io', source: 'linkedin_list' },
-          { name: 'Marcus Johnson', email: 'marcus.j@growthco.com', company: 'GrowthCo', title: 'Head of Sales', url: 'https://growthco.com', source: 'csv_import' },
-          { name: 'Aisha Patel', email: 'aisha@innovatelabs.dev', company: 'InnovateLabs', title: 'CTO', url: 'https://innovatelabs.dev', source: 'manual' },
-          { name: 'David Kim', email: 'dkim@scaleventures.co', company: 'ScaleVentures', title: 'Director of Operations', url: 'https://scaleventures.co', source: 'csv_import' },
-          { name: 'Elena Rodriguez', email: 'elena.r@dataflow.ai', company: 'DataFlow AI', title: 'Chief Revenue Officer', url: 'https://dataflow.ai', source: 'linkedin_list' },
-          { name: 'James Wright', email: 'jwright@cloudstack.io', company: 'CloudStack', title: 'VP Engineering', url: 'https://cloudstack.io', source: 'manual' },
-          { name: 'Priya Sharma', email: 'priya@neuralpath.dev', company: 'NeuralPath', title: 'Head of Product', url: 'https://neuralpath.dev', source: 'csv_import' },
-          { name: 'Tom Anderson', email: 'tom.a@buildfast.co', company: 'BuildFast', title: 'Co-founder & CTO', url: 'https://buildfast.co', source: 'linkedin_list' },
-        ];
-        let created = 0;
-        for (const l of leads) {
-          const existing = await db.lead.findFirst({ where: { email: l.email } });
-          if (!existing) {
-            const lead = await db.lead.create({ data: { ...l, status: 'new', emailVerified: false, isBlacklisted: false, doNotContact: false } });
-            // Create signals with intelligence data
-            await db.signal.create({
-              data: {
-                type: 'trigger', content: `${l.title} at ${l.company} — potential outreach target`,
-                source: 'lead_ingestion', relevance: 0.6, confidence: 0.7, leadId: lead.id,
-                urgency: 0.5, reasoning: `New lead from ${l.source}`,
-                recommendedPitchAngle: `Relevant solutions for ${l.company}`,
-                recommendedOffer: 'Free consultation',
-                decayRate: 0.02,
-                detectedAt: new Date(),
-                expiresAt: new Date(Date.now() + 45 * 86400000),
-              },
-            });
-            await db.activity.create({ data: { type: 'lead_created', description: `Lead created from ${l.source}`, phase: 'system', leadId: lead.id } });
-            created++;
-          }
-        }
-        // Ensure a sample campaign exists
-        const existingCampaign = await db.campaign.findFirst();
-        if (!existingCampaign) {
-          await db.campaign.create({
-            data: {
-              name: 'Q1 SaaS Outreach', status: 'running',
-              goal: 'Book 20 demo calls with VP Engineering at SaaS companies',
-              targetAudience: 'VP Engineering, CTO at B2B SaaS (50-500 employees)',
-              offer: 'Free 14-day trial + personalized onboarding',
-              senderName: 'Alex Chen', senderEmail: 'alex@outreachai.com',
-              tone: 'professional', cta: 'Book a 15-min discovery call',
-              maxDailySends: 50, followUpSchedule: '[3,7,14]',
-              productDescription: 'OutreachAI automates personalized outreach, signal detection, and follow-ups for B2B sales teams.',
-              dailySendsCount: 0, dailySendsDate: new Date().toISOString().split('T')[0],
-              channels: '["email","linkedin"]', linkedinEnabled: true,
-            },
-          });
-        }
-        // Add sample memory data
-        await seedSampleMemory();
-        return NextResponse.json({ success: true, data: { created, message: `${created} sample leads added` } });
-      }
-
-      default:
-        return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
+    if (!parsed.success) {
+      return fail('Invalid request payload', 400, 'validation_error', traceId);
     }
+
+    ensureRole(context, ACTION_ROLES[parsed.data.action]);
+    const result = await handleAction(parsed.data, context, traceId);
+    return ok(result, traceId, isQueuedResult(result) ? 202 : 200);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Internal server error';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }
 
 export async function GET() {
+  const traceId = createTraceId();
   try {
-    const runs = await db.pipelineRun.findMany({ orderBy: { createdAt: 'desc' }, take: 50 });
-    return NextResponse.json({ success: true, data: runs });
+    const context = await requireWorkspace();
+    const runs = await db.pipelineRun.findMany({
+      where: { organizationId: context.organizationId },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    return ok(runs, traceId);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Server error' }, { status: 500 });
+    return handleApiError(error, traceId);
   }
 }
 
-async function seedSampleMemory() {
-  const existing = await db.agentMemory.count();
-  if (existing > 0) return; // Only seed once
+async function handleAction(action: OrchestrateAction, context: UserContext, traceId: string) {
+  switch (action.action) {
+    case 'add_lead':
+      return addLeadAction(action, context);
+    case 'add_sample_data':
+      return addSampleDataAction(context);
+    case 'import_csv':
+      return importCsvAction(action, context);
+    case 'run_observe':
+    case 'run_signal_intelligence':
+      return runObserveAction(action, context, traceId);
+    case 'run_think':
+    case 'generate_email':
+      return runThinkAction(action, context, traceId);
+    case 'run_full_pipeline':
+    case 'run_pipeline':
+      return runPipelineAction(action, context, traceId);
+    case 'batch_generate':
+      return batchGenerateAction(action, context, traceId);
+    case 'approve_message':
+      return approveMessageAction(action, context);
+    case 'send_message':
+      return sendMessageAction(action, context, traceId);
+    case 'classify_reply':
+    case 'run_reeval':
+      return classifyReplyAction(action, context);
+    case 'start_autonomous_cycle':
+    case 'run_autonomous_cycle':
+      return startAutonomousCycleAction(action, context, traceId);
+    case 'enable_autonomy':
+      return enableAutonomyAction(action, context);
+  }
+}
 
-  const sampleMemories = [
-    { category: 'winning_hook', key: 'hook_funding_round_saas', value: JSON.stringify({ hook: 'Congratulations on the funding! Here is how to scale faster.', replyRate: 0.32 }), score: 0.8, industry: 'SaaS', persona: 'VP Engineering', channel: 'email' },
-    { category: 'winning_hook', key: 'hook_hiring_spike_saas', value: JSON.stringify({ hook: 'Saw you are hiring — let us help your new team hit the ground running.', replyRate: 0.28 }), score: 0.7, industry: 'SaaS', persona: 'CTO', channel: 'linkedin' },
-    { category: 'channel_effectiveness', key: 'channel_email_saas_vp', value: JSON.stringify({ channel: 'email', effectiveness: 0.22 }), score: 0.65, industry: 'SaaS', persona: 'VP Engineering', channel: 'email' },
-    { category: 'channel_effectiveness', key: 'channel_linkedin_saas_cto', value: JSON.stringify({ channel: 'linkedin', effectiveness: 0.35 }), score: 0.75, industry: 'SaaS', persona: 'CTO', channel: 'linkedin' },
-    { category: 'signal_correlation', key: 'signal_funding_round_saas', value: JSON.stringify({ signalType: 'funding_round', conversionRate: 0.12 }), score: 0.8, industry: 'SaaS', channel: 'email' },
-    { category: 'signal_correlation', key: 'signal_hiring_spike_saas', value: JSON.stringify({ signalType: 'hiring_spike', conversionRate: 0.08 }), score: 0.6, industry: 'SaaS', channel: 'linkedin' },
-    { category: 'persona_pattern', key: 'pattern_vp_eng_professional', value: JSON.stringify({ strategy: 'value-first', bestTone: 'professional', bestCta: 'Book a 15-min chat' }), score: 0.7, persona: 'VP Engineering', channel: 'email' },
-    { category: 'offer_performance', key: 'offer_free_trial_saas', value: JSON.stringify({ offer: 'Free 14-day trial + personalized onboarding', conversionRate: 0.09 }), score: 0.65, industry: 'SaaS', channel: 'email' },
+async function addLeadAction(input: z.infer<typeof AddLeadSchema>, context: UserContext) {
+  const email = input.email.trim().toLowerCase();
+  const emailCheck = validateEmail(email);
+  if (!emailCheck.valid) {
+    throw new Error(`Invalid email: ${emailCheck.reason}`);
+  }
+
+  if (await isOnDncList(email, context.organizationId)) {
+    throw new ApiAuthError('Email is on Do-Not-Contact list', 403);
+  }
+
+  const existing = await db.lead.findFirst({
+    where: { organizationId: context.organizationId, email },
+  });
+  if (existing) {
+    return { created: false, lead: existing };
+  }
+
+  const lead = await db.lead.create({
+    data: {
+      organizationId: context.organizationId,
+      name: input.name.trim(),
+      email,
+      company: input.company,
+      title: input.title,
+      url: input.url,
+      linkedinUrl: input.linkedinUrl,
+      source: 'manual',
+      status: 'new',
+      autonomyEnabled: input.autonomyEnabled === true,
+    },
+  });
+
+  await db.activity.create({
+    data: {
+      organizationId: context.organizationId,
+      type: 'lead_created',
+      description: `Lead created: ${lead.name}`,
+      phase: 'system',
+      leadId: lead.id,
+    },
+  });
+
+  return { created: true, lead };
+}
+
+async function runObserveAction(input: z.infer<typeof RunObserveSchema>, context: UserContext, traceId: string) {
+  const lead = await db.lead.findFirst({
+    where: { id: input.leadId, organizationId: context.organizationId },
+  });
+  if (!lead) throw new Error('Lead not found');
+
+  const scrapeJob = await enqueueJob('scrape', {
+    organizationId: context.organizationId,
+    userId: context.userId,
+    leadId: input.leadId,
+    urls: input.urls,
+    traceId,
+  });
+
+  const signalJob = await enqueueJob('signal-intelligence', {
+    organizationId: context.organizationId,
+    userId: context.userId,
+    leadId: input.leadId,
+    traceId,
+  });
+
+  return { jobs: [scrapeJob, signalJob] };
+}
+
+async function runThinkAction(input: z.infer<typeof RunThinkSchema>, context: UserContext, traceId: string) {
+  const lead = await db.lead.findFirst({
+    where: { id: input.leadId, organizationId: context.organizationId },
+  });
+  if (!lead) throw new Error('Lead not found');
+
+  if (input.campaignId) {
+    const campaign = await db.campaign.findFirst({
+      where: { id: input.campaignId, organizationId: context.organizationId },
+    });
+    if (!campaign) throw new Error('Campaign not found');
+  }
+
+  return enqueueJob('draft-email', {
+    organizationId: context.organizationId,
+    userId: context.userId,
+    leadId: input.leadId,
+    campaignId: input.campaignId,
+    objective: input.objective,
+    traceId,
+  });
+}
+
+async function batchGenerateAction(input: z.infer<typeof BatchGenerateSchema>, context: UserContext, traceId: string) {
+  if (input.campaignId) {
+    const campaign = await db.campaign.findFirst({
+      where: { id: input.campaignId, organizationId: context.organizationId },
+    });
+    if (!campaign) throw new Error('Campaign not found');
+  }
+
+  const leads = await db.lead.findMany({
+    where: { id: { in: input.leadIds }, organizationId: context.organizationId },
+    select: { id: true },
+  });
+
+  if (leads.length !== input.leadIds.length) {
+    throw new Error('One or more leads were not found');
+  }
+
+  const jobs = await Promise.all(leads.map(lead => enqueueJob('draft-email', {
+    organizationId: context.organizationId,
+    userId: context.userId,
+    leadId: lead.id,
+    campaignId: input.campaignId,
+    traceId,
+  })));
+
+  return { jobs };
+}
+
+async function enableAutonomyAction(input: z.infer<typeof EnableAutonomySchema>, context: UserContext) {
+  if (input.campaignId) {
+    const campaign = await db.campaign.updateMany({
+      where: { id: input.campaignId, organizationId: context.organizationId },
+      data: { autonomyEnabled: true },
+    });
+    if (campaign.count === 0) throw new Error('Campaign not found');
+
+    const leadIds = await db.outreachMessage.findMany({
+      where: { organizationId: context.organizationId, campaignId: input.campaignId },
+      select: { leadId: true },
+      distinct: ['leadId'],
+    });
+
+    await db.lead.updateMany({
+      where: { organizationId: context.organizationId, id: { in: leadIds.map(row => row.leadId) } },
+      data: { autonomyEnabled: true, nextActionAt: new Date() },
+    });
+
+    return { enabled: leadIds.length, type: 'campaign' };
+  }
+
+  const updated = await db.lead.updateMany({
+    where: { id: input.leadId, organizationId: context.organizationId },
+    data: { autonomyEnabled: true, nextActionAt: new Date() },
+  });
+  if (updated.count === 0) throw new Error('Lead not found');
+  return { enabled: 1, type: 'lead' };
+}
+
+async function addSampleDataAction(context: UserContext) {
+  const leads = [
+    { name: 'Sarah Chen', email: 'sarah.chen@techcorp.io', company: 'TechCorp', title: 'VP of Engineering', url: 'https://techcorp.io', source: 'sample_data' },
+    { name: 'Marcus Johnson', email: 'marcus.j@growthco.com', company: 'GrowthCo', title: 'Head of Sales', url: 'https://growthco.com', source: 'sample_data' },
+    { name: 'Aisha Patel', email: 'aisha@innovatelabs.dev', company: 'InnovateLabs', title: 'CTO', url: 'https://innovatelabs.dev', source: 'sample_data' },
   ];
 
-  for (const m of sampleMemories) {
-    await db.agentMemory.create({
+  let created = 0;
+  for (const item of leads) {
+    const existing = await db.lead.findFirst({
+      where: { organizationId: context.organizationId, email: item.email },
+    });
+    if (existing) continue;
+
+    const lead = await db.lead.create({
+      data: { ...item, organizationId: context.organizationId, status: 'new', autonomyEnabled: true },
+    });
+    await db.signal.create({
       data: {
-        category: m.category, key: m.key, value: m.value, score: m.score,
-        sampleSize: Math.floor(Math.random() * 20) + 5,
-        successCount: Math.floor(m.score * 25),
-        failCount: Math.floor((1 - m.score) * 15),
-        industry: m.industry, persona: m.persona, channel: m.channel,
+        organizationId: context.organizationId,
+        leadId: lead.id,
+        type: 'trigger',
+        content: `${lead.title || 'Leader'} at ${lead.company || 'company'} is a relevant outbound prospect`,
+        source: 'sample_data',
+        relevance: 0.7,
+        confidence: 0.7,
+        urgency: 0.5,
+        reasoning: 'Sample lead for local evaluation',
+        recommendedPitchAngle: 'Operational scaling conversation',
+        recommendedOffer: 'Free workflow audit',
+      },
+    });
+    await db.activity.create({
+      data: {
+        organizationId: context.organizationId,
+        leadId: lead.id,
+        type: 'lead_created',
+        description: `Sample lead created: ${lead.name}`,
+        phase: 'system',
+      },
+    });
+    created++;
+  }
+
+  const existingCampaign = await db.campaign.findFirst({
+    where: { organizationId: context.organizationId, name: 'Sample SaaS Outreach' },
+  });
+  if (!existingCampaign) {
+    await db.campaign.create({
+      data: {
+        organizationId: context.organizationId,
+        name: 'Sample SaaS Outreach',
+        status: 'draft',
+        goal: 'Book qualified discovery calls',
+        targetAudience: 'B2B SaaS leaders',
+        offer: 'Free workflow audit',
+        senderName: 'Alex',
+        senderEmail: 'alex@example.com',
+        tone: 'professional',
+        cta: 'Book a 15-minute call',
+        productDescription: 'AI-assisted outbound operating system',
       },
     });
   }
+
+  return { created };
+}
+
+function ensureRole(context: UserContext, required: WorkspaceRole) {
+  if (!hasRole(context.role, required)) {
+    throw new ApiAuthError('Forbidden', 403);
+  }
+}
+
+function isQueuedResult(result: unknown) {
+  if (!result || typeof result !== 'object') return false;
+  if ('backend' in result && 'jobId' in result) return true;
+  if ('jobs' in result) return true;
+  return false;
 }

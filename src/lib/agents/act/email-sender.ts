@@ -22,13 +22,16 @@ export class EmailSenderAgent extends BaseAgent<EmailSenderInput, ActOutput> {
   async execute(input: EmailSenderInput, context: AgentContext): Promise<ActOutput> {
     const { message, dryRun = false } = input;
     const leadId = context.leadId;
+    if (!context.organizationId) {
+      return { messageId: message.id, channel: 'email', crmLogged: false, followUpsScheduled: [] };
+    }
 
     // ═══ SAFETY CHECKS ═══
     // 1. Check if lead is safe to contact
-    const safety = await isLeadSafeToContact(leadId);
+    const safety = await isLeadSafeToContact(leadId, context.organizationId);
     if (!safety.safe) {
       await db.activity.create({
-        data: { type: 'email_blocked', description: `Send blocked: ${safety.reasons.join(', ')}`, phase: 'act', leadId, metadata: JSON.stringify({ reasons: safety.reasons }) },
+        data: { organizationId: context.organizationId, type: 'email_blocked', description: `Send blocked: ${safety.reasons.join(', ')}`, phase: 'act', leadId, metadata: JSON.stringify({ reasons: safety.reasons }) },
       });
       return { messageId: message.id, channel: 'email', crmLogged: false, followUpsScheduled: [] };
     }
@@ -38,7 +41,7 @@ export class EmailSenderAgent extends BaseAgent<EmailSenderInput, ActOutput> {
       const limitCheck = await checkSendingLimit(context.campaignId);
       if (!limitCheck.allowed) {
         await db.activity.create({
-          data: { type: 'email_blocked', description: `Daily sending limit reached (${limitCheck.remaining} remaining)`, phase: 'act', leadId, metadata: JSON.stringify({ campaignId: context.campaignId }) },
+          data: { organizationId: context.organizationId, type: 'email_blocked', description: `Daily sending limit reached (${limitCheck.remaining} remaining)`, phase: 'act', leadId, metadata: JSON.stringify({ campaignId: context.campaignId }) },
         });
         return { messageId: message.id, channel: 'email', crmLogged: false, followUpsScheduled: [] };
       }
@@ -60,12 +63,13 @@ export class EmailSenderAgent extends BaseAgent<EmailSenderInput, ActOutput> {
       messageId: message.id,
       leadId,
       campaignId: context.campaignId,
+      organizationId: context.organizationId,
       dryRun,
     });
 
     if (!result.success) {
       await db.activity.create({
-        data: { type: 'email_blocked', description: `Send failed: ${result.error}`, phase: 'act', leadId },
+        data: { organizationId: context.organizationId, type: 'email_blocked', description: `Send failed: ${result.error}`, phase: 'act', leadId },
       });
       return { messageId: message.id, channel: 'email', crmLogged: false, followUpsScheduled: [] };
     }

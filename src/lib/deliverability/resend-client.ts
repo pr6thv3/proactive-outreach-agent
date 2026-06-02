@@ -15,6 +15,7 @@ export interface SendEmailParams {
   headers?: Record<string, string>;
   tags?: Array<{ name: string; value: string }>;
   // Our internal tracking
+  organizationId: string;
   messageId?: string;        // Our OutreachMessage ID
   leadId?: string;
   campaignId?: string;
@@ -120,6 +121,7 @@ export async function sendEmailViaResend(params: SendEmailParams): Promise<SendE
     await db.emailEvent.create({
       data: {
         eventType: 'sent',
+        organizationId: params.organizationId,
         providerId: data?.id,
         recipient: Array.isArray(params.to) ? params.to[0] : params.to,
         messageId: params.messageId,

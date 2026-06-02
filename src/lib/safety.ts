@@ -41,9 +41,12 @@ export function validateEmail(email: string): { valid: boolean; reason?: string 
 /**
  * Check if an email is on the Do Not Contact list
  */
-export async function isOnDncList(email: string): Promise<boolean> {
-  const entry = await db.doNotContact.findUnique({
-    where: { email: email.trim().toLowerCase() },
+export async function isOnDncList(email: string, organizationId?: string): Promise<boolean> {
+  const entry = await db.doNotContact.findFirst({
+    where: {
+      email: email.trim().toLowerCase(),
+      ...(organizationId ? { organizationId } : {}),
+    },
   });
   return !!entry;
 }
@@ -51,16 +54,15 @@ export async function isOnDncList(email: string): Promise<boolean> {
 /**
  * Add an email to the DNC list
  */
-export async function addToDncList(email: string, reason: string, source: string, leadId?: string): Promise<void> {
+export async function addToDncList(email: string, reason: string, source: string, leadId?: string, organizationId?: string): Promise<void> {
   const lower = email.trim().toLowerCase();
-  try {
-    await db.doNotContact.upsert({
-      where: { email: lower },
-      create: { email: lower, reason, source, leadId },
-      update: { reason, source },
-    });
-  } catch {
-    // Unique constraint — already exists, that's fine
+  const existing = await db.doNotContact.findFirst({
+    where: { email: lower, ...(organizationId ? { organizationId } : {}) },
+  });
+  if (existing) {
+    await db.doNotContact.update({ where: { id: existing.id }, data: { reason, source } });
+  } else {
+    await db.doNotContact.create({ data: { organizationId, email: lower, reason, source, leadId } });
   }
 }
 
@@ -114,10 +116,15 @@ export function appendUnsubscribeFooter(body: string, _senderEmail: string): str
 /**
  * Comprehensive safety check before contacting a lead
  */
-export async function isLeadSafeToContact(leadId: string): Promise<{ safe: boolean; reasons: string[] }> {
+export async function isLeadSafeToContact(leadId: string, organizationId?: string): Promise<{ safe: boolean; reasons: string[] }> {
   const reasons: string[] = [];
 
-  const lead = await db.lead.findUnique({ where: { id: leadId } });
+  const lead = await db.lead.findFirst({
+    where: {
+      id: leadId,
+      ...(organizationId ? { organizationId } : {}),
+    },
+  });
   if (!lead) {
     return { safe: false, reasons: ['Lead not found'] };
   }
@@ -130,7 +137,7 @@ export async function isLeadSafeToContact(leadId: string): Promise<{ safe: boole
     reasons.push('Lead is marked do-not-contact');
   }
 
-  const onDnc = await isOnDncList(lead.email);
+  const onDnc = await isOnDncList(lead.email, organizationId || lead.organizationId || undefined);
   if (onDnc) {
     reasons.push('Email is on Do-Not-Contact list');
   }
