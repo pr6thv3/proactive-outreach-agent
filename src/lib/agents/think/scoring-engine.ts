@@ -33,11 +33,13 @@ export class ScoringEngine extends BaseAgent<ScoringInput, LeadScores> {
 
   async execute(input: ScoringInput, context: AgentContext): Promise<LeadScores> {
     const leadId = context.leadId;
+    const organizationId = context.organizationId;
+    const scopedWhere = organizationId ? { organizationId } : {};
 
     // 1. Check if we already have a recent score (skip if < 1 hour old)
     if (!input.forceRescore) {
       const recentScore = await db.leadScoreHistory.findFirst({
-        where: { leadId },
+        where: { leadId, ...scopedWhere },
         orderBy: { createdAt: 'desc' },
       });
       if (recentScore && Date.now() - new Date(recentScore.createdAt).getTime() < 3600000) {
@@ -55,13 +57,13 @@ export class ScoringEngine extends BaseAgent<ScoringInput, LeadScores> {
     }
 
     // 2. Gather all data
-    const signals = await db.signal.findMany({ where: { leadId } });
-    const messages = await db.outreachMessage.findMany({ where: { leadId } });
+    const signals = await db.signal.findMany({ where: { leadId, ...scopedWhere } });
+    const messages = await db.outreachMessage.findMany({ where: { leadId, ...scopedWhere } });
     const replies = await db.replyClassification.findMany({
-      where: { message: { leadId } },
+      where: { ...scopedWhere, message: { leadId, ...scopedWhere } },
     });
     const memory = await db.agentMemory.findMany({
-      where: { OR: [{ leadId }, { industry: context.lead.company || undefined }, { persona: context.lead.title || undefined }] },
+      where: { ...scopedWhere, OR: [{ leadId }, { industry: context.lead.company || undefined }, { persona: context.lead.title || undefined }] },
       take: 20,
       orderBy: { score: 'desc' },
     });
@@ -87,6 +89,7 @@ export class ScoringEngine extends BaseAgent<ScoringInput, LeadScores> {
     // 9. Save score to history
     await db.leadScoreHistory.create({
       data: {
+        organizationId,
         leadScore, signalScore, replyProb, conversionProb, spamRisk, priorityTier,
         reason: input.forceRescore ? 'Manual rescore' : 'Automatic scoring',
         scoringVersion: 'v2',
@@ -95,14 +98,15 @@ export class ScoringEngine extends BaseAgent<ScoringInput, LeadScores> {
     });
 
     // 10. Update lead with scores
-    await db.lead.update({
-      where: { id: leadId },
+    await db.lead.updateMany({
+      where: { id: leadId, ...scopedWhere },
       data: { leadScore, signalScore, replyProb, conversionProb, spamRisk, priorityTier },
     });
 
     // 11. Log activity
     await db.activity.create({
       data: {
+        organizationId,
         type: 'scored',
         description: `Lead scored: ${leadScore.toFixed(0)}/100 (${priorityTier}). Signal: ${signalScore.toFixed(0)}, Reply prob: ${(replyProb * 100).toFixed(0)}%, Spam risk: ${(spamRisk * 100).toFixed(0)}%`,
         phase: 'think',

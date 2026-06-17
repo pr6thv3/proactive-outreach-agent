@@ -186,7 +186,16 @@ export class SignalExtractorAgent extends BaseAgent<SignalExtractorInput, Observ
 
     // Gather all context: existing signals + scraped data
     const existingSignals = input.existingSignals || context.signals;
-    const scrapeData = await db.scrapeData.findMany({ where: { leadId: context.leadId, status: 'completed' } });
+    const evidenceSignal = existingSignals
+      .filter(signal => signal.sourceUrl)
+      .sort((a, b) => (b.confidence * (b.urgency || b.relevance || 0)) - (a.confidence * (a.urgency || a.relevance || 0)))[0];
+    const scrapeData = await db.scrapeData.findMany({
+      where: {
+        leadId: context.leadId,
+        ...(context.organizationId ? { organizationId: context.organizationId } : {}),
+        status: 'completed',
+      },
+    });
 
     const scrapedContent = scrapeData
       .map(s => [s.aboutText, s.careersText, s.blogText, s.newsText].filter(Boolean).join('\n'))
@@ -270,12 +279,15 @@ NEVER generate generic signals like "may face challenges" — be specific and ac
 
           const saved = await db.signal.create({
             data: {
+              organizationId: context.organizationId,
               type: normalisedType,
               content: sig.content || 'Signal detected',
               source: 'signal_extractor_llm',
               relevance: clamp(sig.relevance),
               confidence: clamp(sig.confidence),
               rawSnippet: scrapedContent.slice(0, 500) || null,
+              sourceUrl: evidenceSignal?.sourceUrl || null,
+              sourceTitle: evidenceSignal?.sourceTitle || null,
               // ─── Signal Intelligence Fields (THE MOAT) ───
               urgency: clamp(sig.urgency ?? template?.baseUrgency ?? 0.5),
               reasoning: sig.reasoning || template?.description || null,
@@ -294,12 +306,15 @@ NEVER generate generic signals like "may face challenges" — be specific and ac
           if (sig.inferred_pain && normalisedType !== 'pain_point') {
             const painSaved = await db.signal.create({
               data: {
+                organizationId: context.organizationId,
                 type: 'pain_point',
                 content: `Inferred from ${normalisedType}: ${sig.inferred_pain}`,
                 source: 'signal_extractor_llm_inferred',
                 relevance: clamp(sig.relevance * 0.8),
                 confidence: clamp(sig.confidence * 0.7),
                 rawSnippet: null,
+                sourceUrl: evidenceSignal?.sourceUrl || null,
+                sourceTitle: evidenceSignal?.sourceTitle || null,
                 urgency: clamp((sig.urgency ?? 0.5) * 0.9),
                 reasoning: `Pain inferred from ${normalisedType} signal`,
                 recommendedPitchAngle: sig.recommended_pitch_angle || template?.defaultPitchAngle || null,
@@ -323,12 +338,15 @@ NEVER generate generic signals like "may face challenges" — be specific and ac
         const template = SIGNAL_TEMPLATES[sig.type];
         const saved = await db.signal.create({
           data: {
+            organizationId: context.organizationId,
             type: sig.type,
             content: sig.content,
             source: 'signal_extractor_rules',
             relevance: sig.relevance,
             confidence: sig.confidence,
             leadId: context.leadId,
+            sourceUrl: evidenceSignal?.sourceUrl || null,
+            sourceTitle: evidenceSignal?.sourceTitle || null,
             urgency: sig.urgency,
             reasoning: sig.reasoning || template?.description || null,
             recommendedPitchAngle: sig.recommendedPitchAngle || template?.defaultPitchAngle || null,
@@ -518,6 +536,7 @@ function generateIntelligentFallback(
 function mapSignalFull(s: {
   id: string; type: string; content: string; source: string;
   relevance: number; confidence: number; rawSnippet: string | null;
+  sourceUrl?: string | null; sourceTitle?: string | null;
   urgency: number | null; reasoning: string | null;
   recommendedPitchAngle: string | null; recommendedOffer: string | null;
   decayRate: number | null; detectedAt: Date | null; expiresAt: Date | null;
@@ -530,6 +549,8 @@ function mapSignalFull(s: {
     relevance: s.relevance,
     confidence: s.confidence,
     rawSnippet: s.rawSnippet || undefined,
+    sourceUrl: s.sourceUrl || undefined,
+    sourceTitle: s.sourceTitle || undefined,
     urgency: s.urgency ?? undefined,
     reasoning: s.reasoning ?? undefined,
     recommendedPitchAngle: s.recommendedPitchAngle ?? undefined,

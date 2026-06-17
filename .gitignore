@@ -66,6 +66,9 @@ server.log
 db/*.db
 db/*.db-journal
 db/*.db-wal
+prisma/*.db
+prisma/*.db-journal
+prisma/*.db-wal
 
 # Mini-services
 /mini-services/

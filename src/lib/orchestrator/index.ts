@@ -20,6 +20,7 @@ import { JobQueue } from '../agents/infrastructure/job-queue';
 import { selectBestChannel, type Channel } from '../agents/infrastructure/multi-channel';
 import { logger, generateTraceId } from '../agents/infrastructure/observability';
 import { trackEdit, feedEditToMemory, updateEditOutcome } from '../agents/act/edit-tracker';
+import { buildEvidenceSnapshot } from '../agents/think/evidence';
 import { db } from '@/lib/db';
 import { isLeadSafeToContact, parseCsv } from '@/lib/safety';
 import {
@@ -58,12 +59,11 @@ export class Orchestrator {
   }
 
   // ─── OBSERVE Phase (Enhanced with Signal Intelligence) ───
-  async runObserve(leadId: string, urls?: string[]): Promise<AgentResult<ObserveOutput>> {
-    const traceId = generateTraceId();
+  async runObserve(leadId: string, urls?: string[], organizationId?: string, traceId = generateTraceId()): Promise<AgentResult<ObserveOutput>> {
     logger.setTraceId(traceId);
     logger.info('Starting OBSERVE phase', { agent: 'Orchestrator', phase: 'observe', leadId, traceId });
 
-    const context = await this.buildContext(leadId);
+    const context = await this.buildContext(leadId, undefined, organizationId, traceId);
     if (!context) return this.leadNotFound('ObservePipeline');
 
     // 1. Scrape company website
@@ -76,7 +76,7 @@ export class Orchestrator {
 
     // 3. THE MOAT: Signal Intelligence (WHY NOW?)
     if (this.config.enableSignalIntelligence) {
-      const intelContext = await this.buildContext(leadId);
+      const intelContext = await this.buildContext(leadId, undefined, context.organizationId, traceId);
       if (intelContext) {
         const intelResult = await signalIntelligence.run({ existingSignals: intelContext.signals }, intelContext);
         if (intelResult.success && intelResult.data) {
@@ -90,16 +90,16 @@ export class Orchestrator {
 
     // 4. Score the lead
     if (this.config.enableScoring) {
-      const scoreContext = await this.buildContext(leadId);
+      const scoreContext = await this.buildContext(leadId, undefined, context.organizationId, traceId);
       if (scoreContext) await scoringEngine.run({}, scoreContext);
     }
 
     const enrichedLead = extractResult.success && extractResult.data ? extractResult.data.enrichedLead : context.lead;
 
     // Update lead status
-    await db.lead.update({ where: { id: leadId }, data: { status: 'enriched' } });
+    await db.lead.updateMany({ where: { id: leadId, ...(context.organizationId ? { organizationId: context.organizationId } : {}) }, data: { status: 'enriched' } });
 
-    const finalContext = await this.buildContext(leadId);
+    const finalContext = await this.buildContext(leadId, undefined, context.organizationId, traceId);
     const finalSignals = finalContext?.signals || combinedSignals;
 
     return {
@@ -111,12 +111,11 @@ export class Orchestrator {
   }
 
   // ─── THINK Phase (Enhanced with Signal Intelligence Context) ───
-  async runThink(leadId: string, campaignId?: string, objective?: string): Promise<AgentResult<ThinkOutput>> {
-    const traceId = generateTraceId();
+  async runThink(leadId: string, campaignId?: string, objective?: string, organizationId?: string, traceId = generateTraceId()): Promise<AgentResult<ThinkOutput>> {
     logger.setTraceId(traceId);
     logger.info('Starting THINK phase', { agent: 'Orchestrator', phase: 'think', leadId, traceId });
 
-    const context = await this.buildContext(leadId, campaignId);
+    const context = await this.buildContext(leadId, campaignId, organizationId, traceId);
     if (!context) return this.leadNotFound('ThinkPipeline');
 
     // Get top signal intelligence for pitch context
@@ -154,6 +153,7 @@ export class Orchestrator {
         ? (await selectBestChannel(context)).toString() as ThinkOutput['recommendedChannel']
         : 'email',
     };
+    const evidenceSnapshot = buildEvidenceSnapshot(context.signals, enrichedStrategy);
 
     // Save the generated email sequence to CRM
     const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -173,6 +173,7 @@ export class Orchestrator {
         signalTypeUsed: enrichedStrategy.signalTypeUsed,
         urgencyAtGeneration: enrichedStrategy.urgencyAtGeneration,
         pitchAngleUsed: enrichedStrategy.pitchAngleUsed,
+        evidenceSnapshot,
       },
       emailSequence: enrichedStrategy.emailSequence,
     }, context);
@@ -183,9 +184,9 @@ export class Orchestrator {
     }
 
     // Update lead status with signal context
-    await db.lead.update({ where: { id: leadId }, data: { status: 'generated' } });
-    await db.outreachMessage.update({
-      where: { id: messageId },
+    await db.lead.updateMany({ where: { id: leadId, ...(context.organizationId ? { organizationId: context.organizationId } : {}) }, data: { status: 'generated' } });
+    await db.outreachMessage.updateMany({
+      where: { id: messageId, ...(context.organizationId ? { organizationId: context.organizationId } : {}) },
       data: {
         signalTypeUsed: enrichedStrategy.signalTypeUsed,
         urgencyAtGeneration: enrichedStrategy.urgencyAtGeneration,
@@ -198,6 +199,7 @@ export class Orchestrator {
         type: 'email_generated',
         description: `Email sequence generated (${enrichedStrategy.emailSequence?.length || 1} emails). Signal: ${topSignal?.type || 'none'} (urgency: ${(topSignal?.urgency || 0).toFixed(2)}). Pitch: ${enrichedStrategy.pitchAngleUsed || enrichedStrategy.angle}`,
         phase: 'think',
+        organizationId: context.organizationId,
         leadId,
         metadata: JSON.stringify({
           messageId,
@@ -218,12 +220,12 @@ export class Orchestrator {
   }
 
   // ─── APPROVE a generated message (with edit tracking) ────
-  async approveMessage(messageId: string, editedSubject?: string, editedBody?: string): Promise<{ success: boolean; error?: string }> {
-    const msg = await db.outreachMessage.findUnique({ where: { id: messageId } });
+  async approveMessage(messageId: string, editedSubject?: string, editedBody?: string, organizationId?: string): Promise<{ success: boolean; error?: string }> {
+    const msg = await db.outreachMessage.findFirst({ where: { id: messageId, ...(organizationId ? { organizationId } : {}) } });
     if (!msg) return { success: false, error: 'Message not found' };
     if (msg.status !== 'generated' && msg.status !== 'draft') return { success: false, error: `Cannot approve message in "${msg.status}" status` };
 
-    const safety = await isLeadSafeToContact(msg.leadId);
+    const safety = await isLeadSafeToContact(msg.leadId, organizationId || msg.organizationId || undefined);
     if (!safety.safe) return { success: false, error: `Lead not safe to contact: ${safety.reasons.join(', ')}` };
 
     // ═══ EDIT TRACKING (Human-in-the-Loop Learning) ═══
@@ -264,8 +266,8 @@ export class Orchestrator {
       await feedEditToMemory(edit.id);
     }
 
-    await db.outreachMessage.update({
-      where: { id: messageId },
+    await db.outreachMessage.updateMany({
+      where: { id: messageId, ...(organizationId || msg.organizationId ? { organizationId: organizationId || msg.organizationId || undefined } : {}) },
       data: {
         status: 'approved',
         subject: editedSubject || msg.subject,
@@ -275,35 +277,37 @@ export class Orchestrator {
       },
     });
 
-    await db.lead.update({ where: { id: msg.leadId }, data: { status: 'approved' } });
-    await db.activity.create({ data: { type: 'email_approved', description: `Email approved${hasSubjectEdit || hasBodyEdit ? ' (with edits)' : ''}: "${editedSubject || msg.subject}"`, phase: 'act', leadId: msg.leadId } });
+    await db.lead.updateMany({ where: { id: msg.leadId, ...(organizationId || msg.organizationId ? { organizationId: organizationId || msg.organizationId || undefined } : {}) }, data: { status: 'approved' } });
+    await db.activity.create({ data: { organizationId: organizationId || msg.organizationId, type: 'email_approved', description: `Email approved${hasSubjectEdit || hasBodyEdit ? ' (with edits)' : ''}: "${editedSubject || msg.subject}"`, phase: 'act', leadId: msg.leadId } });
 
     return { success: true };
   }
 
   // ─── SEND an approved message ─────────────────────
-  async sendMessage(messageId: string, dryRun = false): Promise<AgentResult<ActOutput>> {
-    const msg = await db.outreachMessage.findUnique({ where: { id: messageId }, include: { lead: true } });
+  async sendMessage(messageId: string, dryRun = false, organizationId?: string, traceId?: string): Promise<AgentResult<ActOutput>> {
+    const msg = await db.outreachMessage.findFirst({
+      where: { id: messageId, ...(organizationId ? { organizationId } : {}) },
+      include: { lead: true },
+    });
     if (!msg) return { success: false, data: null as unknown as ActOutput, error: 'Message not found', durationMs: 0, agentName: 'EmailSender', phase: 'act' };
     if (msg.status !== 'approved') return { success: false, data: null as unknown as ActOutput, error: `Message must be "approved", got "${msg.status}"`, durationMs: 0, agentName: 'EmailSender', phase: 'act' };
 
-    const context = await this.buildContext(msg.leadId, msg.campaignId || undefined);
+    const context = await this.buildContext(msg.leadId, msg.campaignId || undefined, organizationId || msg.organizationId || undefined, traceId);
     if (!context) return this.leadNotFound('EmailSender');
 
     return emailSender.run({
       message: {
-        id: msg.id, subject: msg.subject, body: msg.body, channel: msg.channel as MessageData['channel'], status: msg.status as MessageData['status'], strategy: msg.strategy || undefined, angle: msg.angle || undefined, tone: msg.tone || undefined, cta: msg.cta || undefined, sequencePos: msg.sequencePos, campaignId: msg.campaignId || undefined,
+        id: msg.id, subject: msg.subject, body: msg.body, channel: msg.channel as MessageData['channel'], status: msg.status as MessageData['status'], strategy: msg.strategy || undefined, angle: msg.angle || undefined, tone: msg.tone || undefined, cta: msg.cta || undefined, sequencePos: msg.sequencePos, campaignId: msg.campaignId || undefined, evidenceSnapshot: msg.evidenceSnapshot,
       },
       dryRun,
     }, context);
   }
 
   // ─── RE-EVAL Phase (Enhanced with Memory Learning) ───
-  async runReEval(leadId: string, messageId: string, replyText: string): Promise<AgentResult<ReEvalOutput>> {
-    const traceId = generateTraceId();
+  async runReEval(leadId: string, messageId: string, replyText: string, organizationId?: string, traceId = generateTraceId()): Promise<AgentResult<ReEvalOutput>> {
     logger.setTraceId(traceId);
 
-    const context = await this.buildContext(leadId);
+    const context = await this.buildContext(leadId, undefined, organizationId, traceId);
     if (!context) return this.leadNotFound('ReEvalPipeline');
 
     const result = await replyClassifier.run({ messageId, replyText }, context);
@@ -311,11 +315,18 @@ export class Orchestrator {
     // Learn from the outcome (THE COMPOUNDING STEP)
     if (result.success && this.config.enableMemoryLearning) {
       const lead = context.lead;
-      const msg = await db.outreachMessage.findUnique({ where: { id: messageId } });
+      const msg = await db.outreachMessage.findFirst({
+        where: {
+          id: messageId,
+          leadId,
+          ...(context.organizationId ? { organizationId: context.organizationId } : {}),
+        },
+      });
 
       if (msg) {
         // Record feedback on the strategy/hook used
         await AgentMemoryService.recordFeedback({
+          organizationId: context.organizationId,
           category: 'persona_pattern',
           key: `strategy_${msg.strategy || 'unknown'}_${lead.title || 'unknown'}`,
           wasSuccessful: result.data.category === 'interested',
@@ -327,6 +338,7 @@ export class Orchestrator {
         // Record feedback on the signal type used
         if (msg.signalTypeUsed) {
           await AgentMemoryService.recordFeedback({
+            organizationId: context.organizationId,
             category: 'signal_correlation',
             key: `signal_${msg.signalTypeUsed}_${lead.company || 'unknown'}`,
             wasSuccessful: result.data.category === 'interested',
@@ -337,6 +349,7 @@ export class Orchestrator {
 
         // Record channel effectiveness
         await AgentMemoryService.recordFeedback({
+          organizationId: context.organizationId,
           category: 'channel_effectiveness',
           key: `channel_${msg.channel}_${lead.company || 'unknown'}_${lead.title || 'unknown'}`,
           wasSuccessful: result.data.category === 'interested' || result.data.category === 'neutral',
@@ -348,6 +361,7 @@ export class Orchestrator {
         // Record hook performance
         if (msg.pitchAngleUsed) {
           await AgentMemoryService.recordFeedback({
+            organizationId: context.organizationId,
             category: 'winning_hook',
             key: `hook_${msg.pitchAngleUsed.replace(/\s+/g, '_').slice(0, 50)}_${lead.company || 'unknown'}`,
             wasSuccessful: result.data.category === 'interested',
@@ -376,8 +390,9 @@ export class Orchestrator {
   }
 
   // ─── Full Pipeline (observe + think + score, no auto-send) ──
-  async runFullPipeline(leadId: string, options?: { campaignId?: string; objective?: string }): Promise<PipelineState> {
-    const traceId = generateTraceId();
+  async runFullPipeline(leadId: string, options?: { campaignId?: string; objective?: string; organizationId?: string; traceId?: string }): Promise<PipelineState> {
+    const traceId = options?.traceId || generateTraceId();
+    const organizationId = options?.organizationId;
     logger.setTraceId(traceId);
     logger.info('Starting full pipeline', { agent: 'Orchestrator', leadId, traceId });
 
@@ -387,17 +402,17 @@ export class Orchestrator {
     };
 
     // OBSERVE
-    const observeResult = await this.runObserve(leadId);
+    const observeResult = await this.runObserve(leadId, undefined, organizationId, traceId);
     state.observeResult = observeResult;
     if (!observeResult.success) state.errors.push({ phase: 'observe', message: observeResult.error || 'Observe failed', timestamp: new Date() });
 
     // THINK
-    const thinkResult = await this.runThink(leadId, options?.campaignId, options?.objective);
+    const thinkResult = await this.runThink(leadId, options?.campaignId, options?.objective, organizationId, traceId);
     state.thinkResult = thinkResult;
     if (!thinkResult.success) state.errors.push({ phase: 'think', message: thinkResult.error || 'Think failed', timestamp: new Date() });
 
     // Get final scores
-    const lead = await db.lead.findUnique({ where: { id: leadId } });
+    const lead = await db.lead.findFirst({ where: { id: leadId, ...(organizationId ? { organizationId } : {}) } });
     if (lead) {
       state.scores = {
         leadScore: lead.leadScore,
@@ -411,7 +426,7 @@ export class Orchestrator {
 
     // Get signal intelligence summary
     const topSignal = await db.signal.findFirst({
-      where: { leadId, urgency: { gt: 0 } },
+      where: { leadId, ...(lead?.organizationId ? { organizationId: lead.organizationId } : {}), urgency: { gt: 0 } },
       orderBy: { urgency: 'desc' },
     });
     if (topSignal) {
@@ -432,6 +447,7 @@ export class Orchestrator {
       data: {
         phase: 'full_pipeline',
         status: state.status,
+        organizationId: lead?.organizationId,
         leadId,
         durationMs: state.completedAt ? state.completedAt.getTime() - state.startedAt.getTime() : 0,
         traceId,
@@ -447,12 +463,12 @@ export class Orchestrator {
   }
 
   // ─── Batch: generate for multiple leads ───────────
-  async batchGenerate(leadIds: string[], campaignId?: string): Promise<Array<{ leadId: string; success: boolean; error?: string }>> {
+  async batchGenerate(leadIds: string[], campaignId?: string, organizationId?: string, traceId = generateTraceId()): Promise<Array<{ leadId: string; success: boolean; error?: string }>> {
     const results: Array<{ leadId: string; success: boolean; error?: string }> = [];
     for (const leadId of leadIds) {
       try {
-        await this.runObserve(leadId);
-        await this.runThink(leadId, campaignId);
+        await this.runObserve(leadId, undefined, organizationId, traceId);
+        await this.runThink(leadId, campaignId, undefined, organizationId, traceId);
         results.push({ leadId, success: true });
       } catch (error) {
         results.push({ leadId, success: false, error: error instanceof Error ? error.message : 'Unknown error' });
@@ -483,16 +499,17 @@ export class Orchestrator {
   }
 
   // ─── Helpers ────────────────────────────────────────
-  private async buildContext(leadId: string, campaignId?: string): Promise<AgentContext | null> {
-    const lead = await db.lead.findUnique({ where: { id: leadId } });
+  private async buildContext(leadId: string, campaignId?: string, organizationId?: string, traceId?: string): Promise<AgentContext | null> {
+    const lead = await db.lead.findFirst({ where: { id: leadId, ...(organizationId ? { organizationId } : {}) } });
     if (!lead) return null;
 
-    const signals = await db.signal.findMany({ where: { leadId } });
-    const previousMessages = await db.outreachMessage.findMany({ where: { leadId } });
+    const scopedOrganizationId = organizationId || lead.organizationId || undefined;
+    const signals = await db.signal.findMany({ where: { leadId, ...(scopedOrganizationId ? { organizationId: scopedOrganizationId } : {}) } });
+    const previousMessages = await db.outreachMessage.findMany({ where: { leadId, ...(scopedOrganizationId ? { organizationId: scopedOrganizationId } : {}) } });
 
     let campaignConfig: CampaignConfig | undefined;
     if (campaignId) {
-      const campaign = await db.campaign.findUnique({ where: { id: campaignId } });
+      const campaign = await db.campaign.findFirst({ where: { id: campaignId, ...(scopedOrganizationId ? { organizationId: scopedOrganizationId } : {}) } });
       if (campaign) {
         campaignConfig = {
           goal: campaign.goal || '',
@@ -513,13 +530,14 @@ export class Orchestrator {
     }
 
     return {
-      organizationId: lead.organizationId || undefined,
+      organizationId: scopedOrganizationId,
       leadId,
       lead: mapLead(lead),
       signals: signals.map(mapSignal),
       previousMessages: previousMessages.map(mapMsg),
       campaignId,
       campaignConfig,
+      traceId,
     };
   }
 
@@ -547,10 +565,12 @@ function mapLead(l: { id: string; name: string; email: string; company: string |
     nextActionAt: l.nextActionAt ?? undefined,
   };
 }
-function mapSignal(s: { id: string; type: string; content: string; source: string; relevance: number; confidence: number; rawSnippet: string | null; urgency: number | null; reasoning: string | null; recommendedPitchAngle: string | null; recommendedOffer: string | null; decayRate: number | null; detectedAt: Date | null; expiresAt: Date | null }): SignalData {
+function mapSignal(s: { id: string; type: string; content: string; source: string; relevance: number; confidence: number; rawSnippet: string | null; sourceUrl?: string | null; sourceTitle?: string | null; urgency: number | null; reasoning: string | null; recommendedPitchAngle: string | null; recommendedOffer: string | null; decayRate: number | null; detectedAt: Date | null; expiresAt: Date | null }): SignalData {
   return {
     id: s.id, type: s.type as SignalData['type'], content: s.content, source: s.source,
     relevance: s.relevance, confidence: s.confidence, rawSnippet: s.rawSnippet || undefined,
+    sourceUrl: s.sourceUrl || undefined,
+    sourceTitle: s.sourceTitle || undefined,
     urgency: s.urgency ?? undefined,
     reasoning: s.reasoning ?? undefined,
     recommendedPitchAngle: s.recommendedPitchAngle ?? undefined,
@@ -560,7 +580,7 @@ function mapSignal(s: { id: string; type: string; content: string; source: strin
     expiresAt: s.expiresAt ?? undefined,
   };
 }
-function mapMsg(m: { id: string; subject: string; body: string; channel: string; status: string; strategy: string | null; angle: string | null; tone: string | null; cta: string | null; sequencePos: number; campaignId: string | null; approvedBy: string | null; approvedAt: Date | null; sentAt: Date | null; signalTypeUsed: string | null; urgencyAtGeneration: number | null; pitchAngleUsed: string | null }): MessageData {
+function mapMsg(m: { id: string; subject: string; body: string; channel: string; status: string; strategy: string | null; angle: string | null; tone: string | null; cta: string | null; sequencePos: number; campaignId: string | null; approvedBy: string | null; approvedAt: Date | null; sentAt: Date | null; signalTypeUsed: string | null; urgencyAtGeneration: number | null; pitchAngleUsed: string | null; evidenceSnapshot?: unknown }): MessageData {
   return {
     id: m.id, subject: m.subject, body: m.body,
     channel: m.channel as MessageData['channel'], status: m.status as MessageData['status'],
@@ -572,6 +592,7 @@ function mapMsg(m: { id: string; subject: string; body: string; channel: string;
     signalTypeUsed: m.signalTypeUsed || undefined,
     urgencyAtGeneration: m.urgencyAtGeneration ?? undefined,
     pitchAngleUsed: m.pitchAngleUsed || undefined,
+    evidenceSnapshot: m.evidenceSnapshot ?? undefined,
   };
 }
 

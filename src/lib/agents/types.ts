@@ -140,6 +140,9 @@ export interface SignalData {
   relevance: number;
   confidence: number;
   rawSnippet?: string;
+  sourceUrl?: string;
+  sourceTitle?: string;
+  citationQuality?: 'strong' | 'medium' | 'weak';
   // Signal Intelligence
   urgency?: number;
   reasoning?: string;
@@ -169,6 +172,7 @@ export interface MessageData {
   signalTypeUsed?: string;
   urgencyAtGeneration?: number;
   pitchAngleUsed?: string;
+  evidenceSnapshot?: unknown;
   // Delivery Tracking
   deliveredAt?: Date;
   bouncedAt?: Date;

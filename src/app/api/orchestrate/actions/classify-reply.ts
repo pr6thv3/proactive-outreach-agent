@@ -10,7 +10,7 @@ export const ClassifyReplySchema = z.object({
   replyText: z.string().min(1),
 });
 
-export async function classifyReplyAction(input: z.infer<typeof ClassifyReplySchema>, context: UserContext) {
+export async function classifyReplyAction(input: z.infer<typeof ClassifyReplySchema>, context: UserContext, traceId: string) {
   const message = await db.outreachMessage.findFirst({
     where: {
       id: input.messageId,
@@ -19,5 +19,5 @@ export async function classifyReplyAction(input: z.infer<typeof ClassifyReplySch
     },
   });
   if (!message) throw new Error('Message not found');
-  return orchestrator.runReEval(input.leadId, input.messageId, input.replyText);
+  return orchestrator.runReEval(input.leadId, input.messageId, input.replyText, context.organizationId, traceId);
 }

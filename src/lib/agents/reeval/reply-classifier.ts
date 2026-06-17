@@ -60,64 +60,65 @@ JSON: {"category":"...","confidence":0.9,"reasoning":"...","nextAction":"..."}`;
     }
 
     // ═══ POST-CLASSIFICATION ACTIONS ═══
-    await saveClassification(messageId, result, replyText);
-    await applyClassificationActions(context.leadId, messageId, result);
+    await saveClassification(messageId, result, replyText, context.organizationId);
+    await applyClassificationActions(context.leadId, messageId, result, context.organizationId);
 
     return result;
   }
 }
 
-async function saveClassification(messageId: string, result: ReEvalOutput, replyText: string) {
-  await db.replyClassification.create({ data: { messageId, category: result.category, confidence: result.confidence, reasoning: result.reasoning, replyText, nextAction: result.nextAction } });
-  await db.outreachMessage.update({ where: { id: messageId }, data: { status: 'replied' } });
+async function saveClassification(messageId: string, result: ReEvalOutput, replyText: string, organizationId?: string) {
+  await db.replyClassification.create({ data: { organizationId, messageId, category: result.category, confidence: result.confidence, reasoning: result.reasoning, replyText, nextAction: result.nextAction } });
+  await db.outreachMessage.updateMany({ where: { id: messageId, ...(organizationId ? { organizationId } : {}) }, data: { status: 'replied' } });
 }
 
-async function applyClassificationActions(leadId: string, messageId: string, result: ReEvalOutput) {
-  const lead = await db.lead.findUnique({ where: { id: leadId } });
+async function applyClassificationActions(leadId: string, messageId: string, result: ReEvalOutput, organizationId?: string) {
+  const scopedWhere = organizationId ? { organizationId } : {};
+  const lead = await db.lead.findFirst({ where: { id: leadId, ...scopedWhere } });
   if (!lead) return;
 
   switch (result.category) {
     case 'unsubscribe':
       // Add to DNC, blacklist, cancel all follow-ups
-      await addToDncList(lead.email, 'unsubscribed', 'reply_classifier', leadId);
-      await db.lead.update({ where: { id: leadId }, data: { status: 'unsubscribed', doNotContact: true, isBlacklisted: true } });
-      await cancelAllFollowUps(leadId);
-      await db.activity.create({ data: { type: 'lead_unsubscribed', description: `${lead.name} unsubscribed. Added to DNC list.`, phase: 'reeval', leadId } });
+      await addToDncList(lead.email, 'unsubscribed', 'reply_classifier', leadId, organizationId || lead.organizationId || undefined);
+      await db.lead.updateMany({ where: { id: leadId, ...scopedWhere }, data: { status: 'unsubscribed', doNotContact: true, isBlacklisted: true } });
+      await cancelAllFollowUps(leadId, organizationId);
+      await db.activity.create({ data: { organizationId, type: 'lead_unsubscribed', description: `${lead.name} unsubscribed. Added to DNC list.`, phase: 'reeval', leadId } });
       break;
 
     case 'negative':
       // Stop the sequence, but don't blacklist
-      await db.lead.update({ where: { id: leadId }, data: { status: 'negative' } });
-      await cancelAllFollowUps(leadId);
-      await db.activity.create({ data: { type: 'reply_classified', description: `${lead.name} replied negatively. Sequence stopped.`, phase: 'reeval', leadId, metadata: JSON.stringify({ category: 'negative', confidence: result.confidence }) } });
+      await db.lead.updateMany({ where: { id: leadId, ...scopedWhere }, data: { status: 'negative' } });
+      await cancelAllFollowUps(leadId, organizationId);
+      await db.activity.create({ data: { organizationId, type: 'reply_classified', description: `${lead.name} replied negatively. Sequence stopped.`, phase: 'reeval', leadId, metadata: JSON.stringify({ category: 'negative', confidence: result.confidence }) } });
       break;
 
     case 'interested':
       // Notify, escalate
-      await db.lead.update({ where: { id: leadId }, data: { status: 'interested' } });
-      await db.activity.create({ data: { type: 'reply_classified', description: `${lead.name} is INTERESTED! Escalate immediately.`, phase: 'reeval', leadId, metadata: JSON.stringify({ category: 'interested', confidence: result.confidence, replySnippet: result.reasoning }) } });
+      await db.lead.updateMany({ where: { id: leadId, ...scopedWhere }, data: { status: 'interested' } });
+      await db.activity.create({ data: { organizationId, type: 'reply_classified', description: `${lead.name} is INTERESTED! Escalate immediately.`, phase: 'reeval', leadId, metadata: JSON.stringify({ category: 'interested', confidence: result.confidence, replySnippet: result.reasoning }) } });
       break;
 
     case 'neutral':
-      await db.lead.update({ where: { id: leadId }, data: { status: 'replied' } });
-      await db.activity.create({ data: { type: 'reply_classified', description: `${lead.name} replied neutrally.`, phase: 'reeval', leadId } });
+      await db.lead.updateMany({ where: { id: leadId, ...scopedWhere }, data: { status: 'replied' } });
+      await db.activity.create({ data: { organizationId, type: 'reply_classified', description: `${lead.name} replied neutrally.`, phase: 'reeval', leadId } });
       break;
 
     case 'needs_info':
-      await db.lead.update({ where: { id: leadId }, data: { status: 'replied' } });
-      await db.activity.create({ data: { type: 'reply_classified', description: `${lead.name} needs more info.`, phase: 'reeval', leadId } });
+      await db.lead.updateMany({ where: { id: leadId, ...scopedWhere }, data: { status: 'replied' } });
+      await db.activity.create({ data: { organizationId, type: 'reply_classified', description: `${lead.name} needs more info.`, phase: 'reeval', leadId } });
       break;
 
     case 'out_of_office':
       // Keep sequence running, schedule a re-check
-      await db.activity.create({ data: { type: 'reply_classified', description: `${lead.name} is out of office. Sequence continues.`, phase: 'reeval', leadId } });
+      await db.activity.create({ data: { organizationId, type: 'reply_classified', description: `${lead.name} is out of office. Sequence continues.`, phase: 'reeval', leadId } });
       break;
   }
 }
 
-async function cancelAllFollowUps(leadId: string) {
+async function cancelAllFollowUps(leadId: string, organizationId?: string) {
   // Find all messages for this lead, then cancel their scheduled follow-ups
-  const messages = await db.outreachMessage.findMany({ where: { leadId }, select: { id: true } });
+  const messages = await db.outreachMessage.findMany({ where: { leadId, ...(organizationId ? { organizationId } : {}) }, select: { id: true } });
   const messageIds = messages.map(m => m.id);
 
   await db.followUp.updateMany({

@@ -128,6 +128,23 @@ export function SignalIntelligencePanel() {
                     {signal.lead && (
                       <p className="text-[10px] text-slate-500 mt-0.5">{signal.lead} at {signal.company}</p>
                     )}
+                    {signal.sourceUrl && (
+                      <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[8px] text-slate-500">Source:</span>
+                        <a href={signal.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-[8px] text-blue-400 hover:underline inline-flex items-center gap-0.5 max-w-[200px] truncate">
+                          {signal.sourceTitle || signal.sourceUrl}
+                        </a>
+                        {signal.citationQuality && (
+                          <Badge variant="outline" className={`text-[8px] h-3.5 px-1 ${
+                            signal.citationQuality === 'strong' ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/5' :
+                            signal.citationQuality === 'medium' ? 'border-amber-500/30 text-amber-400 bg-amber-500/5' :
+                            'border-slate-700 text-slate-400 bg-slate-800/10'
+                          }`}>
+                            {signal.citationQuality}
+                          </Badge>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     <div className="flex items-center gap-1">
@@ -158,29 +175,50 @@ export function SignalIntelligencePanel() {
             <p className="text-xs text-slate-500">No leads with signal intelligence yet.</p>
           ) : (
             <div className="space-y-1.5">
-              {leadsWithIntelligence.map((lead) => (
-                <div key={lead.id} className="flex items-center gap-3 p-2 rounded-lg bg-slate-800/30 border border-slate-700/30 hover:bg-slate-800/60 transition-colors">
-                  <div className="flex items-center gap-2 min-w-[160px]">
-                    <div>
-                      <p className="text-xs font-medium text-white">{lead.name}</p>
-                      <p className="text-[10px] text-slate-400">{lead.company}</p>
+              {leadsWithIntelligence.map((lead) => {
+                const topSignal = lead.signals.sort((a, b) => (b.urgency || 0) - (a.urgency || 0))[0];
+                return (
+                  <div key={lead.id} className="flex flex-col gap-1.5 p-2 rounded-lg bg-slate-800/30 border border-slate-700/30 hover:bg-slate-800/60 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 min-w-[160px]">
+                        <div>
+                          <p className="text-xs font-medium text-white">{lead.name}</p>
+                          <p className="text-[10px] text-slate-400">{lead.company}</p>
+                        </div>
+                      </div>
+                      <Badge className={`text-[10px] px-1.5 py-0.5 ${SIGNAL_COLORS[lead.topSignalType] || 'bg-slate-500/20 text-slate-400'}`}>
+                        {SIGNAL_LABELS[lead.topSignalType] || lead.topSignalType}
+                      </Badge>
+                      <div className="flex-1">
+                        <Progress value={lead.maxUrgency * 100} className="h-1.5" />
+                      </div>
+                      <span className={`text-xs font-mono font-bold ${lead.maxUrgency >= 0.7 ? 'text-red-400' : lead.maxUrgency >= 0.4 ? 'text-amber-400' : 'text-slate-500'}`}>
+                        {(lead.maxUrgency * 100).toFixed(0)}%
+                      </span>
+                      <Badge className={`text-[10px] ${lead.priorityTier === 'hot' ? 'bg-red-500/20 text-red-400' : lead.priorityTier === 'warm' ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-500/20 text-slate-400'}`}>
+                        {lead.priorityTier}
+                      </Badge>
+                      <div className="text-[10px] text-slate-500">Score: {lead.leadScore?.toFixed(0) || 0}</div>
                     </div>
+                    
+                    {topSignal?.sourceUrl && (
+                      <div className="pl-2.5 border-l border-slate-700 text-[9px] text-slate-500 flex items-center gap-1.5">
+                        <span>Cited Top Signal Source:</span>
+                        <a href={topSignal.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline truncate max-w-[250px]">{topSignal.sourceTitle || topSignal.sourceUrl}</a>
+                        {topSignal.citationQuality && (
+                          <Badge variant="outline" className={`text-[8px] h-3.5 px-1 ${
+                            topSignal.citationQuality === 'strong' ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/5' :
+                            topSignal.citationQuality === 'medium' ? 'border-amber-500/30 text-amber-400 bg-amber-500/5' :
+                            'border-slate-700 text-slate-400 bg-slate-800/10'
+                          }`}>
+                            {topSignal.citationQuality}
+                          </Badge>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <Badge className={`text-[10px] px-1.5 py-0.5 ${SIGNAL_COLORS[lead.topSignalType] || 'bg-slate-500/20 text-slate-400'}`}>
-                    {SIGNAL_LABELS[lead.topSignalType] || lead.topSignalType}
-                  </Badge>
-                  <div className="flex-1">
-                    <Progress value={lead.maxUrgency * 100} className="h-1.5" />
-                  </div>
-                  <span className={`text-xs font-mono font-bold ${lead.maxUrgency >= 0.7 ? 'text-red-400' : lead.maxUrgency >= 0.4 ? 'text-amber-400' : 'text-slate-500'}`}>
-                    {(lead.maxUrgency * 100).toFixed(0)}%
-                  </span>
-                  <Badge className={`text-[10px] ${lead.priorityTier === 'hot' ? 'bg-red-500/20 text-red-400' : lead.priorityTier === 'warm' ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-500/20 text-slate-400'}`}>
-                    {lead.priorityTier}
-                  </Badge>
-                  <div className="text-[10px] text-slate-500">Score: {lead.leadScore?.toFixed(0) || 0}</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>

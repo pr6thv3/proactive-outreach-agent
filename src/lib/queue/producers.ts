@@ -77,11 +77,32 @@ export async function enqueueJob<T extends Partial<OutreachJobData>>(
     dedupeKey: options.dedupeKey,
   };
 
-  const bullJob = await getQueue(queue).add(queue, providerPayload, {
-    jobId,
-    ...(options.dedupeKey ? { deduplication: { id: options.dedupeKey } } : {}),
-    ...RETRY_RULES[queue],
-  });
+  let bullJob;
+  try {
+    bullJob = await getQueue(queue).add(queue, providerPayload, {
+      jobId,
+      ...(options.dedupeKey ? { deduplication: { id: options.dedupeKey } } : {}),
+      ...RETRY_RULES[queue],
+    });
+  } catch (error) {
+    await db.jobQueue.update({
+      where: { id: dbJob.id },
+      data: {
+        result: JSON.stringify({
+          queueError: error instanceof Error ? error.message : String(error),
+          dedupeKey: jobId,
+        }),
+      },
+    });
+
+    return {
+      jobId: dbJob.id,
+      queue,
+      status: 'queued_without_redis',
+      traceId,
+      backend: 'database',
+    };
+  }
 
   await db.jobQueue.update({
     where: { id: dbJob.id },

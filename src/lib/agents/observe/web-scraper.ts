@@ -27,7 +27,7 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
     // 1. Scrape company website with web_reader
     for (const url of urlsToScrape) {
       try {
-        await this.scrapeCompanyWebsite(url, context.leadId);
+        await this.scrapeCompanyWebsite(url, context.leadId, context.organizationId);
       } catch (error) {
         if (process.env.NODE_ENV !== 'production') console.warn(`[WebScraper] Failed to scrape ${url}:`, error);
       }
@@ -47,9 +47,10 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
 
       if (Array.isArray(searchResults)) {
         for (const result of searchResults.slice(0, 5)) {
+          const searchTitle = result.name || String((result as { title?: unknown }).title || '');
           scrapeResults.push({
             url: result.url || '',
-            title: result.name || '',
+            title: searchTitle,
             snippets: [result.snippet || ''],
           });
 
@@ -57,7 +58,18 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
           const extracted = extractSignalsFromText(snippet);
           for (const sig of extracted) {
             const saved = await db.signal.create({
-              data: { type: sig.type, content: sig.content, source: 'web_scraper', relevance: sig.relevance, confidence: sig.confidence, rawSnippet: snippet.slice(0, 500), leadId: context.leadId },
+              data: {
+                organizationId: context.organizationId,
+                type: sig.type,
+                content: sig.content,
+                source: 'web_scraper_search',
+                relevance: sig.relevance,
+                confidence: sig.confidence,
+                rawSnippet: snippet.slice(0, 500),
+                sourceUrl: result.url || null,
+                sourceTitle: searchTitle || null,
+                leadId: context.leadId,
+              },
             });
             signals.push(mapSignal(saved));
           }
@@ -66,23 +78,43 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
     } catch (error) {
       if (process.env.NODE_ENV !== 'production') console.warn('[WebScraper] Web search failed, creating fallback signal:', error);
       const saved = await db.signal.create({
-        data: { type: 'news', content: `Web search unavailable for ${enrichedLead.company || enrichedLead.name}. Manual research recommended.`, source: 'web_scraper_fallback', relevance: 0.3, confidence: 0.3, leadId: context.leadId },
+        data: {
+          organizationId: context.organizationId,
+          type: 'news',
+          content: `Web search unavailable for ${enrichedLead.company || enrichedLead.name}. Manual research recommended.`,
+          source: 'web_scraper_fallback',
+          relevance: 0.3,
+          confidence: 0.3,
+          sourceUrl: enrichedLead.url || null,
+          sourceTitle: enrichedLead.company || enrichedLead.name,
+          leadId: context.leadId,
+        },
       });
       signals.push(mapSignal(saved));
     }
 
     // 3. Update lead status to enriched
     if (signals.length > 0) {
-      await db.lead.update({ where: { id: context.leadId }, data: { status: 'enriched' } });
+      await db.lead.updateMany({
+        where: { id: context.leadId, ...(context.organizationId ? { organizationId: context.organizationId } : {}) },
+        data: { status: 'enriched' },
+      });
       await db.activity.create({
-        data: { type: 'enriched', description: `Lead enriched with ${signals.length} signals from web scraping`, phase: 'observe', leadId: context.leadId, metadata: JSON.stringify({ signalCount: signals.length }) },
+        data: {
+          organizationId: context.organizationId,
+          type: 'enriched',
+          description: `Lead enriched with ${signals.length} signals from web scraping`,
+          phase: 'observe',
+          leadId: context.leadId,
+          metadata: JSON.stringify({ signalCount: signals.length }),
+        },
       });
     }
 
     return { signals, enrichedLead: { ...enrichedLead, status: 'enriched' }, scrapeResults };
   }
 
-  private async scrapeCompanyWebsite(url: string, leadId: string): Promise<void> {
+  private async scrapeCompanyWebsite(url: string, leadId: string, organizationId?: string): Promise<void> {
     try {
       const ZAI = (await import('z-ai-web-dev-sdk')).default;
       const zai = await ZAI.create();
@@ -92,6 +124,8 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
       const mainContent = typeof mainPage === 'object' && mainPage !== null
         ? (mainPage as any)?.html || (mainPage as any)?.content || ''
         : String(mainPage || '');
+      const homepageText = extractTextContent(mainContent);
+      const homepageTitle = extractTitle(mainContent) || 'Company homepage';
 
       // Scrape /about
       let aboutText = '';
@@ -107,13 +141,28 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
         careersText = extractTextContent(careersPage);
       } catch { /* careers page may not exist */ }
 
+      let blogText = '';
+      try {
+        const blogPage = await zai.functions.invoke('web_reader' as any, { url: `${url.replace(/\/$/, '')}/blog` });
+        blogText = extractTextContent(blogPage);
+      } catch { /* blog page may not exist */ }
+
+      let newsText = '';
+      try {
+        const newsPage = await zai.functions.invoke('web_reader' as any, { url: `${url.replace(/\/$/, '')}/news` });
+        newsText = extractTextContent(newsPage);
+      } catch { /* news page may not exist */ }
+
       // Save scrape data
       await db.scrapeData.create({
         data: {
+          organizationId,
           url,
-          pageTitle: extractTitle(mainContent) || url,
+          pageTitle: homepageTitle || url,
           aboutText: aboutText.slice(0, 5000) || null,
           careersText: careersText.slice(0, 5000) || null,
+          blogText: blogText.slice(0, 5000) || null,
+          newsText: newsText.slice(0, 5000) || null,
           rawHtml: mainContent.slice(0, 10000) || null,
           status: 'completed',
           scrapedAt: new Date(),
@@ -121,12 +170,44 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
         },
       });
 
+      // Extract signals from the homepage itself so the primary company source can cite evidence.
+      if (homepageText) {
+        const homepageSignals = extractSignalsFromText(homepageText);
+        for (const sig of homepageSignals) {
+          await db.signal.create({
+            data: {
+              organizationId,
+              type: sig.type,
+              content: sig.content,
+              source: 'web_scraper_homepage',
+              relevance: sig.relevance,
+              confidence: sig.confidence,
+              rawSnippet: homepageText.slice(0, 300),
+              sourceUrl: url,
+              sourceTitle: homepageTitle,
+              leadId,
+            },
+          });
+        }
+      }
+
       // Extract signals from about text
       if (aboutText) {
         const aboutSignals = extractSignalsFromText(aboutText);
         for (const sig of aboutSignals) {
           await db.signal.create({
-            data: { type: sig.type, content: sig.content, source: 'web_scraper_about', relevance: sig.relevance, confidence: sig.confidence, rawSnippet: aboutText.slice(0, 300), leadId },
+            data: {
+              organizationId,
+              type: sig.type,
+              content: sig.content,
+              source: 'web_scraper_about',
+              relevance: sig.relevance,
+              confidence: sig.confidence,
+              rawSnippet: aboutText.slice(0, 300),
+              sourceUrl: `${url.replace(/\/$/, '')}/about`,
+              sourceTitle: 'Company about page',
+              leadId,
+            },
           });
         }
       }
@@ -136,14 +217,49 @@ export class WebScraperAgent extends BaseAgent<WebScraperInput, ObserveOutput> {
         const careerSignals = extractSignalsFromText(careersText);
         for (const sig of careerSignals.filter(s => s.type === 'hiring' || s.type === 'expansion')) {
           await db.signal.create({
-            data: { type: sig.type, content: sig.content, source: 'web_scraper_careers', relevance: sig.relevance, confidence: sig.confidence, rawSnippet: careersText.slice(0, 300), leadId },
+            data: {
+              organizationId,
+              type: sig.type,
+              content: sig.content,
+              source: 'web_scraper_careers',
+              relevance: sig.relevance,
+              confidence: sig.confidence,
+              rawSnippet: careersText.slice(0, 300),
+              sourceUrl: `${url.replace(/\/$/, '')}/careers`,
+              sourceTitle: 'Company careers page',
+              leadId,
+            },
+          });
+        }
+      }
+
+      for (const source of [
+        { text: blogText, source: 'web_scraper_blog', path: 'blog', title: 'Company blog' },
+        { text: newsText, source: 'web_scraper_news', path: 'news', title: 'Company news page' },
+      ]) {
+        if (!source.text) continue;
+        const sourceSignals = extractSignalsFromText(source.text);
+        for (const sig of sourceSignals) {
+          await db.signal.create({
+            data: {
+              organizationId,
+              type: sig.type,
+              content: sig.content,
+              source: source.source,
+              relevance: sig.relevance,
+              confidence: sig.confidence,
+              rawSnippet: source.text.slice(0, 300),
+              sourceUrl: `${url.replace(/\/$/, '')}/${source.path}`,
+              sourceTitle: source.title,
+              leadId,
+            },
           });
         }
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown scrape error';
       await db.scrapeData.create({
-        data: { url, status: 'failed', errorMessage: msg, leadId },
+        data: { organizationId, url, status: 'failed', errorMessage: msg, leadId },
       });
     }
   }
@@ -192,6 +308,6 @@ function extractSignalsFromText(text: string): Array<{ type: SignalData['type'];
   return signals;
 }
 
-function mapSignal(s: { id: string; type: string; content: string; source: string; relevance: number; confidence: number; rawSnippet: string | null }): SignalData {
-  return { id: s.id, type: s.type as SignalData['type'], content: s.content, source: s.source, relevance: s.relevance, confidence: s.confidence, rawSnippet: s.rawSnippet || undefined };
+function mapSignal(s: { id: string; type: string; content: string; source: string; relevance: number; confidence: number; rawSnippet: string | null; sourceUrl?: string | null; sourceTitle?: string | null }): SignalData {
+  return { id: s.id, type: s.type as SignalData['type'], content: s.content, source: s.source, relevance: s.relevance, confidence: s.confidence, rawSnippet: s.rawSnippet || undefined, sourceUrl: s.sourceUrl || undefined, sourceTitle: s.sourceTitle || undefined };
 }

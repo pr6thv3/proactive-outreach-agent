@@ -16,11 +16,11 @@ export async function approveMessageAction(input: z.infer<typeof ApproveMessageS
   });
   if (!message) throw new Error('Message not found');
 
-  const result = await orchestrator.approveMessage(input.messageId, input.editedSubject, input.editedBody);
+  const result = await orchestrator.approveMessage(input.messageId, input.editedSubject, input.editedBody, context.organizationId);
   if (!result.success) throw new Error(result.error || 'Approval failed');
 
-  await db.outreachMessage.update({
-    where: { id: input.messageId },
+  await db.outreachMessage.updateMany({
+    where: { id: input.messageId, organizationId: context.organizationId },
     data: { approvedBy: context.userId },
   }).catch(() => {});
 

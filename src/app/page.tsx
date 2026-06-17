@@ -17,9 +17,11 @@ import { SignalIntelligencePanel } from '@/components/dashboard/signal-intellige
 import { AutonomousLoopPanel } from '@/components/dashboard/autonomous-loop-panel';
 import { ResultsDashboard } from '@/components/dashboard/results-dashboard';
 import { DeliverabilityPanel } from '@/components/dashboard/deliverability-panel';
+import { JobHealthPanel } from '@/components/dashboard/job-health-panel';
+import { DemoRunPanel } from '@/components/dashboard/demo-run-panel';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
-import { Database, RefreshCw, Loader2, Zap, Brain, Shield, TrendingUp } from 'lucide-react';
+import { Database, RefreshCw, Loader2, Zap, Brain, Shield, TrendingUp, Cpu, Rocket } from 'lucide-react';
 
 export default function Home() {
   const { stats, activeTab, pipelineRunning, autonomyRunning, setActiveTab, refreshAll, addSampleData, runAutonomousCycle, addToast } = useDashboardStore();
@@ -84,6 +86,12 @@ export default function Home() {
                 <Zap className="w-3 h-3 mr-1" />Autonomy
               </TabsTrigger>
               <TabsTrigger value="activity" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Activity</TabsTrigger>
+              <TabsTrigger value="jobs" className="data-[state=active]:bg-cyan-600/20 data-[state=active]:text-cyan-400 text-xs px-3">
+                <Cpu className="w-3 h-3 mr-1" />Job Health
+              </TabsTrigger>
+              <TabsTrigger value="demo" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">
+                <Rocket className="w-3 h-3 mr-1" />Demo Run
+              </TabsTrigger>
             </TabsList>
 
             <div className="flex items-center gap-2">
@@ -109,6 +117,8 @@ export default function Home() {
           <TabsContent value="campaigns"><CampaignPanel /></TabsContent>
           <TabsContent value="autonomy"><AutonomousLoopPanel /></TabsContent>
           <TabsContent value="activity"><ActivityTimeline /></TabsContent>
+          <TabsContent value="jobs"><JobHealthPanel /></TabsContent>
+          <TabsContent value="demo"><DemoRunPanel /></TabsContent>
         </Tabs>
       </main>
 

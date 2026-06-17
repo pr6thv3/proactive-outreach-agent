@@ -32,8 +32,10 @@ export interface WarmupStatus {
 /**
  * Get the warmup status for a domain
  */
-export async function getWarmupStatus(domainId: string): Promise<WarmupStatus> {
-  const domain = await db.sendingDomain.findUnique({ where: { id: domainId } });
+export async function getWarmupStatus(domainId: string, organizationId?: string): Promise<WarmupStatus> {
+  const domain = await db.sendingDomain.findFirst({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+  });
   if (!domain) throw new Error(`Domain ${domainId} not found`);
 
   const today = new Date().toISOString().split('T')[0];
@@ -45,8 +47,8 @@ export async function getWarmupStatus(domainId: string): Promise<WarmupStatus> {
       ? domain.warmupDay + 1
       : 1;
 
-    await db.sendingDomain.update({
-      where: { id: domainId },
+    await db.sendingDomain.updateMany({
+      where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
       data: {
         warmupDay: daysSinceStart,
         dailySendsCount: 0,
@@ -109,8 +111,8 @@ export async function getWarmupStatus(domainId: string): Promise<WarmupStatus> {
 /**
  * Check if a domain can send more emails today
  */
-export async function canSendMore(domainId: string): Promise<{ allowed: boolean; remaining: number; reason?: string }> {
-  const status = await getWarmupStatus(domainId);
+export async function canSendMore(domainId: string, organizationId?: string): Promise<{ allowed: boolean; remaining: number; reason?: string }> {
+  const status = await getWarmupStatus(domainId, organizationId);
 
   if (status.isPaused) {
     return { allowed: false, remaining: 0, reason: `Warmup paused: ${status.pauseReason}` };
@@ -136,15 +138,17 @@ export async function canSendMore(domainId: string): Promise<{ allowed: boolean;
 /**
  * Increment the send count for a domain today
  */
-export async function incrementDomainSendCount(domainId: string): Promise<void> {
-  const domain = await db.sendingDomain.findUnique({ where: { id: domainId } });
+export async function incrementDomainSendCount(domainId: string, organizationId?: string): Promise<void> {
+  const domain = await db.sendingDomain.findFirst({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+  });
   if (!domain) return;
 
   const today = new Date().toISOString().split('T')[0];
   const count = domain.dailySendsDate === today ? (domain.dailySendsCount || 0) + 1 : 1;
 
-  await db.sendingDomain.update({
-    where: { id: domainId },
+  await db.sendingDomain.updateMany({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
     data: { dailySendsCount: count, dailySendsDate: today },
   });
 }
@@ -152,8 +156,10 @@ export async function incrementDomainSendCount(domainId: string): Promise<void> 
 /**
  * Update domain aggregate metrics after an email event
  */
-export async function updateDomainMetrics(domainId: string, event: 'sent' | 'delivered' | 'bounced' | 'opened' | 'clicked' | 'complained'): Promise<void> {
-  const domain = await db.sendingDomain.findUnique({ where: { id: domainId } });
+export async function updateDomainMetrics(domainId: string, event: 'sent' | 'delivered' | 'bounced' | 'opened' | 'clicked' | 'complained', organizationId?: string): Promise<void> {
+  const domain = await db.sendingDomain.findFirst({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+  });
   if (!domain) return;
 
   const updates: Record<string, number> = {};
@@ -176,8 +182,8 @@ export async function updateDomainMetrics(domainId: string, event: 'sent' | 'del
   newMetrics.openRate = ((updates.totalOpened ?? domain.totalOpened) / totalDelivered);
   newMetrics.clickRate = ((updates.totalClicked ?? domain.totalClicked) / totalDelivered);
 
-  await db.sendingDomain.update({
-    where: { id: domainId },
+  await db.sendingDomain.updateMany({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
     data: { ...updates, ...newMetrics },
   });
 }
@@ -199,9 +205,9 @@ export function getWarmupSchedule(): Array<{ days: string; limit: number; phase:
 /**
  * Reset warmup for a domain (use with caution)
  */
-export async function resetWarmup(domainId: string): Promise<void> {
-  await db.sendingDomain.update({
-    where: { id: domainId },
+export async function resetWarmup(domainId: string, organizationId?: string): Promise<void> {
+  await db.sendingDomain.updateMany({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
     data: {
       warmupDay: 0,
       warmupDailyLimit: 5,

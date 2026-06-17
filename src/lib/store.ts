@@ -8,7 +8,11 @@ export interface LeadRow {
   id: string; name: string; email: string; company: string | null; title: string | null;
   status: string; source: string; emailVerified: boolean; isBlacklisted: boolean; doNotContact: boolean;
   signalCount: number; messageCount: number; activityCount: number;
-  signals: Array<{ id: string; type: string; content: string; relevance: number; confidence: number; urgency?: number; recommendedPitchAngle?: string }>;
+  signals: Array<{
+    id: string; type: string; content: string; relevance: number; confidence: number;
+    urgency?: number; recommendedPitchAngle?: string; sourceUrl?: string | null;
+    sourceTitle?: string | null; citationQuality?: 'strong' | 'medium' | 'weak';
+  }>;
   activities: Array<{ id: string; type: string; description: string; createdAt: string }>;
   // Scoring
   leadScore: number; signalScore: number; replyProb: number; conversionProb: number; spamRisk: number;
@@ -23,6 +27,12 @@ export interface MessageRow {
   strategy: string | null; angle: string | null; tone: string | null; cta: string | null;
   sequencePos: number; approvedAt: string | null; sentAt: string | null;
   signalTypeUsed: string | null; urgencyAtGeneration: number | null; pitchAngleUsed: string | null;
+  evidenceSnapshot?: {
+    signals?: Array<{ signalId: string; type: string; summary: string; sourceUrl?: string; sourceTitle?: string; citationQuality?: string; confidence?: number; urgency?: number }>;
+    reasoning?: string;
+    pitchAngle?: string;
+    riskNotes?: string[];
+  } | null;
   lead: { id: string; name: string; email: string; company: string | null; status: string; priorityTier?: string };
   followUps: Array<{ id: string; type: string; status: string; scheduledAt: string; sequencePos: number; channel?: string }>;
   replies: Array<{ id: string; category: string; confidence: number; replyText: string | null }>;
@@ -44,6 +54,23 @@ export interface ActivityRow {
   leadId: string; lead: { name: string; company: string | null } | null; createdAt: string;
 }
 
+export interface DnsRecordStatus {
+  type: string;
+  host: string;
+  value: string;
+  verified: boolean;
+  instructions?: string;
+}
+
+export interface DomainDnsStatus {
+  domain: string;
+  spf: DnsRecordStatus;
+  dkim: DnsRecordStatus;
+  dmarc: DnsRecordStatus;
+  overallStatus: 'verified' | 'partial' | 'not_configured' | 'pending';
+  resendDomainId?: string;
+}
+
 export interface SendingDomainRow {
   id: string; domain: string; status: string; provider: string;
   spfVerified: boolean; dkimVerified: boolean; dmarcVerified: boolean;
@@ -54,6 +81,7 @@ export interface SendingDomainRow {
   bounceRate: number; complaintRate: number; openRate: number; clickRate: number;
   reputationScore: number;
   fromEmail: string | null; fromName: string | null;
+  dns: DomainDnsStatus | null;
   warmupStatus?: {
     remaining: number; isComplete: boolean; isPaused: boolean; pauseReason?: string; progressPercent: number;
   };
@@ -91,7 +119,9 @@ export interface DashboardStats {
     total: number; breakdown: Array<{ type: string; count: number }>;
     urgency: { high: number; medium: number; low: number };
     topSignals: Array<{
-      type: string; urgency: number; content: string; recommendedPitchAngle: string | null;
+      type: string; urgency: number; content: string; confidence: number; sourceUrl: string | null;
+      sourceTitle: string | null; citationQuality: 'strong' | 'medium' | 'weak';
+      recommendedPitchAngle: string | null;
       lead: string | null; company: string | null; priorityTier: string | null;
     }>;
   };
@@ -124,17 +154,26 @@ export interface DashboardStats {
   };
   resultsLoop: {
     signalsFound: number;
-    emailsGenerated: number;
-    emailsSent: number;
-    repliesReceived: number;
-    positiveReplies: number;
-    meetingsBooked: number;
+    generatedEmails: number;
+    sentEmails: number;
+    replies: number;
+    meetings: number;
+    deliveryRate: number;
     replyRate: number;
     positiveReplyRate: number;
-    deliveryRate: number;
     openRate: number;
     bounceRate: number;
+    conversionRate?: number;
   };
+}
+
+export interface JobHealthData {
+  redis: { configured: boolean; connected: boolean; latencyMs?: number; error?: string };
+  queues: Array<{ name: string; waiting: number; active: number; completed: number; failed: number; delayed: number }>;
+  totals: { pending: number; running: number; completed: number; failed: number; dead: number; stale: number };
+  recentJobs: Array<{ id: string; type: string; status: string; traceId?: string; createdAt: string }>;
+  oldestPendingAge?: number;
+  traceId: string;
 }
 
 interface DashboardState {
@@ -145,6 +184,7 @@ interface DashboardState {
   domains: SendingDomainRow[];
   emailEvents: EmailEventRow[];
   domainReputation: Record<string, ReputationData>;
+  jobHealth: JobHealthData | null;
   isLoading: boolean;
   activeTab: string;
   pipelineRunning: boolean;
@@ -164,6 +204,7 @@ interface DashboardState {
   fetchCampaigns: () => Promise<void>;
   fetchDomains: () => Promise<void>;
   fetchEmailEvents: (filters?: Record<string, string>) => Promise<void>;
+  fetchJobHealth: () => Promise<void>;
   addDomain: (domain: { domain: string; fromEmail?: string; fromName?: string; warmupEnabled?: boolean }) => Promise<void>;
   verifyDomain: (domainId: string) => Promise<void>;
 
@@ -190,8 +231,28 @@ interface DashboardState {
   refreshAll: () => Promise<void>;
 }
 
+function mapWarmupStatus(value: unknown): SendingDomainRow['warmupStatus'] {
+  if (!value || typeof value !== 'object') return undefined;
+  const warmup = value as {
+    remaining?: number;
+    isComplete?: boolean;
+    isPaused?: boolean;
+    pauseReason?: string;
+    progress?: number;
+    progressPercent?: number;
+  };
+
+  return {
+    remaining: warmup.remaining ?? 0,
+    isComplete: warmup.isComplete === true,
+    isPaused: warmup.isPaused === true,
+    pauseReason: warmup.pauseReason,
+    progressPercent: warmup.progressPercent ?? Math.round((warmup.progress ?? 0) * 100),
+  };
+}
+
 export const useDashboardStore = create<DashboardState>((set, get) => ({
-  stats: null, leads: [], messages: [], campaigns: [], domains: [], emailEvents: [], domainReputation: {},
+  stats: null, leads: [], messages: [], campaigns: [], domains: [], emailEvents: [], domainReputation: {}, jobHealth: null,
   isLoading: false, activeTab: 'results', pipelineRunning: false, pipelinePhase: null, autonomyRunning: false, toasts: [],
 
   setActiveTab: (tab) => set({ activeTab: tab }),
@@ -258,7 +319,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
           openRate: d.openRate as number, clickRate: d.clickRate as number,
           reputationScore: d.reputationScore as number,
           fromEmail: d.fromEmail as string | null, fromName: d.fromName as string | null,
-          warmupStatus: d.warmupStatus as SendingDomainRow['warmupStatus'],
+          dns: (d.dns as SendingDomainRow['dns']) || null,
+          warmupStatus: mapWarmupStatus(d.warmup),
           createdAt: d.createdAt as string,
         }));
         set({ domains });
@@ -272,6 +334,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       const r = await fetch(`/api/email-events${params}`); const j = await r.json();
       if (j.success) set({ emailEvents: j.data.events });
     } catch { /* silent */ }
+  },
+
+  fetchJobHealth: async () => {
+    try { const r = await fetch('/api/jobs/health'); const j = await r.json(); if (j.success) set({ jobHealth: j.data }); } catch { /* silent */ }
   },
 
   addDomain: async (data) => {
@@ -436,6 +502,6 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   },
 
   refreshAll: async () => {
-    await Promise.all([get().fetchStats(), get().fetchLeads(), get().fetchMessages(), get().fetchCampaigns(), get().fetchDomains()]);
+    await Promise.all([get().fetchStats(), get().fetchLeads(), get().fetchMessages(), get().fetchCampaigns(), get().fetchDomains(), get().fetchJobHealth()]);
   },
 }));

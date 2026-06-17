@@ -170,6 +170,8 @@ model Signal {
   relevance      Float         @default(0.5) // 0.0 - 1.0
   confidence     Float         @default(0.5) // 0.0 - 1.0 — how confident we are this signal is real
   rawSnippet     String? // The original text the signal was extracted from
+  sourceUrl      String? // Citation URL for the evidence that produced this signal
+  sourceTitle    String? // Human-readable citation title
 
   // ─── Signal Intelligence Fields (THE MOAT) ───
   urgency               Float     @default(0.5) // 0.0 - 1.0 — WHY outreach should happen NOW
@@ -324,6 +326,7 @@ model OutreachMessage {
   originalBody      String?
   finalBody         String?
   variationMetadata String?
+  evidenceSnapshot  Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

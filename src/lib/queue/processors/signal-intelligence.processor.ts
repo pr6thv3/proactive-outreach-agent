@@ -3,5 +3,5 @@ import { SignalIntelligenceJobData } from '@/lib/queue/types';
 
 export async function processSignalIntelligenceJob(data: SignalIntelligenceJobData) {
   if (!data.leadId) throw new Error('leadId is required');
-  return orchestrator.runObserve(data.leadId);
+  return orchestrator.runObserve(data.leadId, undefined, data.organizationId, data.traceId);
 }

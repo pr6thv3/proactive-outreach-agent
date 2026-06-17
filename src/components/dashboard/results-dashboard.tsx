@@ -91,10 +91,10 @@ export function ResultsDashboard() {
   // ─── Funnel Steps ───
   const funnelSteps: FunnelStep[] = [
     { icon: Search, label: 'Signals Found', value: r?.signalsFound ?? 0, color: 'text-amber-400', iconBg: 'bg-amber-500/10 border-amber-500/20' },
-    { icon: Mail, label: 'Emails Generated', value: r?.emailsGenerated ?? 0, color: 'text-blue-400', iconBg: 'bg-blue-500/10 border-blue-500/20' },
-    { icon: Send, label: 'Emails Sent', value: r?.emailsSent ?? 0, sub: r?.deliveryRate ? `${r.deliveryRate.toFixed(0)}% delivered` : undefined, color: 'text-purple-400', iconBg: 'bg-purple-500/10 border-purple-500/20' },
-    { icon: MessageSquare, label: 'Replies', value: r?.repliesReceived ?? 0, sub: r?.replyRate ? `${r.replyRate.toFixed(0)}% reply rate` : undefined, color: 'text-emerald-400', iconBg: 'bg-emerald-500/10 border-emerald-500/20' },
-    { icon: Calendar, label: 'Meetings', value: r?.meetingsBooked ?? 0, color: 'text-teal-400', iconBg: 'bg-teal-500/10 border-teal-500/20' },
+    { icon: Mail, label: 'Emails Generated', value: r?.generatedEmails ?? 0, color: 'text-blue-400', iconBg: 'bg-blue-500/10 border-blue-500/20' },
+    { icon: Send, label: 'Emails Sent', value: r?.sentEmails ?? 0, sub: r?.deliveryRate ? `${r.deliveryRate.toFixed(0)}% delivered` : undefined, color: 'text-purple-400', iconBg: 'bg-purple-500/10 border-purple-500/20' },
+    { icon: MessageSquare, label: 'Replies', value: r?.replies ?? 0, sub: r?.replyRate ? `${r.replyRate.toFixed(0)}% reply rate` : undefined, color: 'text-emerald-400', iconBg: 'bg-emerald-500/10 border-emerald-500/20' },
+    { icon: Calendar, label: 'Meetings', value: r?.meetings ?? 0, color: 'text-teal-400', iconBg: 'bg-teal-500/10 border-teal-500/20' },
     { icon: DollarSign, label: 'Revenue', value: 0, color: 'text-emerald-400', iconBg: 'bg-emerald-500/10 border-emerald-500/20' },
   ];
 

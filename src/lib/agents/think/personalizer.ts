@@ -24,7 +24,10 @@ export class PersonalizerAgent extends BaseAgent<PersonalizerInput, ThinkOutput>
       const ZAI = (await import('z-ai-web-dev-sdk')).default;
       const zai = await ZAI.create();
 
-      const signalFacts = context.signals.slice(0, 5).map((s, i) => `${i + 1}. [${s.type}] ${s.content}`).join('\n');
+      const signalFacts = context.signals
+        .slice(0, 5)
+        .map((s, i) => `${i + 1}. [${s.type}] ${s.content} (citation: ${s.sourceUrl ? `${s.sourceTitle || s.sourceUrl} - ${s.sourceUrl}` : 'uncited'})`)
+        .join('\n');
 
       const prompt = `Personalize this email sequence for a specific lead.
 
@@ -47,12 +50,13 @@ Rewrite the emailSequence with hyper-personalization:
 - Keep under 150 words per email
 - Natural, not salesy
 - Sender signs as ${senderName}
+- Do not mention funding, hiring, traffic drops, tech stack, product launches, competitors, or other factual company events unless the claim is supported by a signal with a citation URL. Uncited signals can only shape general tone.
 
 Return full JSON: { strategy, angle, hook, subject, body, tone, reasoning, cta, emailSequence: [{subject, body, sequencePos, type}] }`;
 
       const completion = await zai.chat.completions.create({
         messages: [
-          { role: 'system', content: 'You write hyper-personalized outreach. Always respond with valid JSON.' },
+          { role: 'system', content: 'You write hyper-personalized outreach. Always respond with valid JSON. Never invent company facts; factual claims must be supported by cited signals.' },
           { role: 'user', content: prompt },
         ],
         temperature: 0.75,
@@ -70,7 +74,7 @@ Return full JSON: { strategy, angle, hook, subject, body, tone, reasoning, cta, 
 
     // Fallback: inject personalization into template sequence
     const company = context.lead.company || 'your organization';
-    const topSignal = context.signals[0];
+    const topSignal = context.signals.find(signal => signal.sourceUrl);
     const sequence = strategy.emailSequence || [];
 
     if (sequence.length > 0) {

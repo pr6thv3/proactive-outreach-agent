@@ -16,6 +16,7 @@ export type MemoryCategory =
   | 'offer_performance';    // Which offers convert best
 
 export interface MemoryEntry {
+  organizationId?: string;
   category: MemoryCategory;
   key: string;
   value: Record<string, unknown>;
@@ -26,6 +27,7 @@ export interface MemoryEntry {
 }
 
 export interface MemoryQuery {
+  organizationId?: string;
   category?: MemoryCategory;
   industry?: string;
   persona?: string;
@@ -35,6 +37,7 @@ export interface MemoryQuery {
 }
 
 export interface MemoryFeedback {
+  organizationId?: string;
   category: MemoryCategory;
   key: string;
   wasSuccessful: boolean;  // Did this lead to a positive outcome?
@@ -52,7 +55,7 @@ export class AgentMemoryService {
    */
   static async store(entry: MemoryEntry): Promise<void> {
     const existingKey = await db.agentMemory.findFirst({
-      where: { category: entry.category, key: entry.key },
+      where: { category: entry.category, key: entry.key, ...(entry.organizationId ? { organizationId: entry.organizationId } : {}) },
     });
 
     if (existingKey) {
@@ -81,6 +84,7 @@ export class AgentMemoryService {
       await db.agentMemory.create({
         data: {
           category: entry.category,
+          organizationId: entry.organizationId,
           key: entry.key,
           value: JSON.stringify(entry.value),
           score: entry.score,
@@ -102,6 +106,7 @@ export class AgentMemoryService {
   static async query(query: MemoryQuery): Promise<Array<MemoryEntry & { sampleSize: number; useCount: number }>> {
     const where: Record<string, unknown> = {};
 
+    if (query.organizationId) where.organizationId = query.organizationId;
     if (query.category) where.category = query.category;
     if (query.industry) where.industry = query.industry;
     if (query.persona) where.persona = query.persona;
@@ -136,7 +141,7 @@ export class AgentMemoryService {
    */
   static async recordFeedback(feedback: MemoryFeedback): Promise<void> {
     const existing = await db.agentMemory.findFirst({
-      where: { category: feedback.category, key: feedback.key },
+      where: { category: feedback.category, key: feedback.key, ...(feedback.organizationId ? { organizationId: feedback.organizationId } : {}) },
     });
 
     if (existing) {
@@ -161,6 +166,7 @@ export class AgentMemoryService {
       await db.agentMemory.create({
         data: {
           category: feedback.category,
+          organizationId: feedback.organizationId,
           key: feedback.key,
           value: JSON.stringify({ wasSuccessful: feedback.wasSuccessful }),
           score: feedback.wasSuccessful ? 0.7 : 0.3,
@@ -179,6 +185,7 @@ export class AgentMemoryService {
    * Record a campaign outcome — this is the most valuable feedback
    */
   static async recordCampaignOutcome(data: {
+    organizationId?: string;
     campaignId: string;
     campaignName: string;
     industry?: string;
@@ -197,6 +204,7 @@ export class AgentMemoryService {
     // Store campaign result
     await this.store({
       category: 'campaign_result',
+      organizationId: data.organizationId,
       key: `campaign_${data.campaignId}`,
       value: {
         name: data.campaignName,
@@ -219,6 +227,7 @@ export class AgentMemoryService {
     if (data.topHook && replyRate > 0.1) {
       await this.store({
         category: 'winning_hook',
+        organizationId: data.organizationId,
         key: `hook_${data.industry || 'general'}_${data.persona || 'general'}_${Date.now()}`,
         value: { hook: data.topHook, replyRate, channel: data.channel },
         score: replyRate,
@@ -232,6 +241,7 @@ export class AgentMemoryService {
     if (data.topSignalType && conversionRate > 0.05) {
       await this.store({
         category: 'signal_correlation',
+        organizationId: data.organizationId,
         key: `signal_${data.topSignalType}_${data.industry || 'general'}`,
         value: { signalType: data.topSignalType, conversionRate, channel: data.channel },
         score: conversionRate,
@@ -246,6 +256,7 @@ export class AgentMemoryService {
    * Get smart recommendations based on accumulated memory
    */
   static async getRecommendations(params: {
+    organizationId?: string;
     industry?: string;
     persona?: string;
     channel?: string;
@@ -256,10 +267,10 @@ export class AgentMemoryService {
     bestSignalTypes: Array<{ signalType: string; conversionRate: number }>;
   }> {
     const [hooks, offers, channels, signals] = await Promise.all([
-      this.query({ category: 'winning_hook', industry: params.industry, persona: params.persona, limit: 5, minScore: 0.3 }),
-      this.query({ category: 'offer_performance', industry: params.industry, limit: 5, minScore: 0.3 }),
-      this.query({ category: 'channel_effectiveness', industry: params.industry, persona: params.persona, limit: 5, minScore: 0.3 }),
-      this.query({ category: 'signal_correlation', industry: params.industry, limit: 5, minScore: 0.3 }),
+      this.query({ organizationId: params.organizationId, category: 'winning_hook', industry: params.industry, persona: params.persona, limit: 5, minScore: 0.3 }),
+      this.query({ organizationId: params.organizationId, category: 'offer_performance', industry: params.industry, limit: 5, minScore: 0.3 }),
+      this.query({ organizationId: params.organizationId, category: 'channel_effectiveness', industry: params.industry, persona: params.persona, limit: 5, minScore: 0.3 }),
+      this.query({ organizationId: params.organizationId, category: 'signal_correlation', industry: params.industry, limit: 5, minScore: 0.3 }),
     ]);
 
     return {

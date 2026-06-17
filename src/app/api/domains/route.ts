@@ -1,7 +1,7 @@
 // ─── API: Domains — Sending Domain Management ─────────
 // CRUD for email sending domains with DNS verification and warmup
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { db } from '@/lib/db';
 import { DeliverabilityService } from '@/lib/deliverability';
 import { checkDomainDnsStatus } from '@/lib/deliverability/dns-checker';
@@ -24,11 +24,11 @@ export async function GET() {
       let warmupStatus: Awaited<ReturnType<typeof getWarmupStatus>> | undefined;
 
       try {
-        dnsStatus = await checkDomainDnsStatus(d.id);
+        dnsStatus = await checkDomainDnsStatus(d.id, context.organizationId);
       } catch { /* Domain may not exist in Resend yet */ }
 
       try {
-        warmupStatus = await getWarmupStatus(d.id);
+        warmupStatus = await getWarmupStatus(d.id, context.organizationId);
       } catch { /* Warmup data may not be ready */ }
 
       return {
@@ -89,22 +89,22 @@ export async function PATCH(request: NextRequest) {
 
     switch (action) {
       case 'verify': {
-        const dnsStatus = await DeliverabilityService.verifyDomain(domainId);
+        const dnsStatus = await DeliverabilityService.verifyDomain(domainId, context.organizationId);
         return ok(dnsStatus, traceId);
       }
 
       case 'pause_warmup': {
-        await db.sendingDomain.update({ where: { id: domainId }, data: { warmupEnabled: false } });
+        await db.sendingDomain.updateMany({ where: { id: domainId, organizationId: context.organizationId }, data: { warmupEnabled: false } });
         return ok({ warmupEnabled: false }, traceId);
       }
 
       case 'resume_warmup': {
-        await db.sendingDomain.update({ where: { id: domainId }, data: { warmupEnabled: true } });
+        await db.sendingDomain.updateMany({ where: { id: domainId, organizationId: context.organizationId }, data: { warmupEnabled: true } });
         return ok({ warmupEnabled: true }, traceId);
       }
 
       case 'reset_warmup': {
-        await resetWarmup(domainId);
+        await resetWarmup(domainId, context.organizationId);
         return ok({ message: 'Warmup reset to day 0' }, traceId);
       }
 

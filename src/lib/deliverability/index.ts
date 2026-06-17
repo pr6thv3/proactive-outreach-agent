@@ -11,6 +11,7 @@ import { scheduleSends, isInSendWindow, getOptimalSendTime, MIN_SEND_INTERVAL_MS
 import { db } from '@/lib/db';
 import { isLeadSafeToContact, appendUnsubscribeFooter, checkSendingLimit } from '@/lib/safety';
 import { logger } from '@/lib/agents/infrastructure/observability';
+import { assertReadyToSend } from '@/lib/deliverability/send-readiness';
 import type { Campaign, Lead, OutreachMessage, SenderAccount, SendingDomain } from '@prisma/client';
 
 export interface SendResult {
@@ -162,8 +163,8 @@ class DeliverabilityServiceClass {
     }
 
     // Increment domain send count
-    await incrementDomainSendCount(domain.id);
-    await updateDomainMetrics(domain.id, 'sent');
+    await incrementDomainSendCount(domain.id, organizationId);
+    await updateDomainMetrics(domain.id, 'sent', organizationId);
     await this.incrementSenderSendCount(sender.id);
 
     // Log activity
@@ -260,7 +261,7 @@ class DeliverabilityServiceClass {
     });
 
     // Get DNS records to configure
-    dnsRecords = await checkDomainDnsStatus(domain.id);
+    dnsRecords = await checkDomainDnsStatus(domain.id, organizationId);
 
     return {
       success: true,
@@ -272,19 +273,19 @@ class DeliverabilityServiceClass {
   /**
    * Verify domain DNS records
    */
-  async verifyDomain(domainId: string): Promise<DomainDnsStatus> {
-    const status = await checkDomainDnsStatus(domainId);
+  async verifyDomain(domainId: string, organizationId?: string): Promise<DomainDnsStatus> {
+    const status = await checkDomainDnsStatus(domainId, organizationId);
 
     // Update our records
     await updateDomainDnsStatus(domainId, {
       spfVerified: status.spf.verified,
       dkimVerified: status.dkim.verified,
       dmarcVerified: status.dmarc.verified,
-    });
+    }, organizationId);
 
     if (status.overallStatus === 'verified') {
       await db.senderAccount.updateMany({
-        where: { domainId, status: 'pending' },
+        where: { domainId, ...(organizationId ? { organizationId } : {}), status: 'pending' },
         data: { status: 'active' },
       });
     }
@@ -307,58 +308,20 @@ class DeliverabilityServiceClass {
   }> {
     const { organizationId, campaignId, leadId, messageId, senderId } = params;
     if (!organizationId) throw new Error('organizationId is required');
-
-    const message = messageId
-      ? await db.outreachMessage.findFirst({ where: { id: messageId, organizationId } })
-      : null;
-    if (messageId && !message) throw new Error('Message not found');
-    if (message && message.status !== 'approved') {
-      throw new Error(`Message must be approved before sending; current status is ${message.status}`);
+    if (senderId || campaignId || leadId) {
+      // The beta readiness contract is message-centric, but these params remain
+      // for compatibility with older call sites.
     }
 
-    const resolvedLeadId = leadId || message?.leadId;
-    if (!resolvedLeadId) throw new Error('leadId is required');
-    const lead = await db.lead.findFirst({ where: { id: resolvedLeadId, organizationId } });
-    if (!lead) throw new Error('Lead not found');
-
-    const safety = await isLeadSafeToContact(lead.id, organizationId);
-    if (!safety.safe) {
-      throw new Error(`Safety check failed: ${safety.reasons.join(', ')}`);
-    }
-
-    const resolvedCampaignId = campaignId || message?.campaignId || undefined;
-    const campaign = resolvedCampaignId
-      ? await db.campaign.findFirst({ where: { id: resolvedCampaignId, organizationId } })
-      : null;
-    if (resolvedCampaignId && !campaign) throw new Error('Campaign not found');
-    if (campaign?.status && ['paused', 'archived', 'completed'].includes(campaign.status)) {
-      throw new Error(`Campaign is not sendable: ${campaign.status}${campaign.pausedReason ? ` (${campaign.pausedReason})` : ''}`);
-    }
-
-    if (campaign) {
-      const campaignLimit = await checkSendingLimit(campaign.id);
-      if (!campaignLimit.allowed) {
-        throw new Error('Campaign daily sending limit reached');
-      }
-    }
-
-    const selection = await this.selectSender({ organizationId, campaignId: resolvedCampaignId, senderId: senderId || message?.senderId || undefined });
-    const canSend = await canSendMore(selection.domain.id);
-    if (!canSend.allowed) {
-      throw new Error(canSend.reason || 'Daily sending limit reached (domain warmup)');
-    }
-
-    const pauseCheck = await shouldPauseSending(selection.domain.id);
-    if (pauseCheck.pause) {
-      throw new Error(`Sending paused: ${pauseCheck.reason}`);
-    }
+    if (!messageId) throw new Error('messageId is required for send readiness');
+    const ready = await assertReadyToSend({ organizationId, messageId, traceId: `send:${messageId}` });
 
     return {
-      lead,
-      campaign: campaign || undefined,
-      message: message || undefined,
-      sender: selection.sender,
-      domain: selection.domain,
+      lead: ready.lead,
+      campaign: ready.campaign,
+      message: ready.message,
+      sender: ready.sender,
+      domain: ready.domain,
     };
   }
 
@@ -546,13 +509,13 @@ class DeliverabilityServiceClass {
   /**
    * Check domain sending quota (considers warmup + reputation)
    */
-  async checkSendingQuota(domainId: string): Promise<{ allowed: boolean; remaining: number; reason?: string }> {
+  async checkSendingQuota(domainId: string, organizationId?: string): Promise<{ allowed: boolean; remaining: number; reason?: string }> {
     // Check warmup quota
-    const warmup = await canSendMore(domainId);
+    const warmup = await canSendMore(domainId, organizationId);
     if (!warmup.allowed) return warmup;
 
     // Check reputation
-    const pause = await shouldPauseSending(domainId);
+    const pause = await shouldPauseSending(domainId, organizationId);
     if (pause.pause) {
       return { allowed: false, remaining: 0, reason: pause.reason };
     }

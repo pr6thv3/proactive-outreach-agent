@@ -55,8 +55,10 @@ export function getRequiredDnsRecords(domain: string): { spf: DnsRecordStatus; d
  * Check the DNS verification status of a domain
  * Uses Resend's API to verify, plus our internal DB tracking
  */
-export async function checkDomainDnsStatus(domainId: string): Promise<DomainDnsStatus> {
-  const domain = await db.sendingDomain.findUnique({ where: { id: domainId } });
+export async function checkDomainDnsStatus(domainId: string, organizationId?: string): Promise<DomainDnsStatus> {
+  const domain = await db.sendingDomain.findFirst({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+  });
   if (!domain) {
     throw new Error(`Domain ${domainId} not found`);
   }
@@ -69,6 +71,42 @@ export async function checkDomainDnsStatus(domainId: string): Promise<DomainDnsS
     if (resendStatus) {
       // Cast to access dynamic properties from Resend domain response
       const statusData = resendStatus as unknown as Record<string, unknown>;
+      
+      // Parse records array if available
+      const records = statusData.records as Array<{
+        record: string;
+        name: string;
+        type: string;
+        value: string;
+        status: string;
+      }> | undefined;
+
+      if (Array.isArray(records)) {
+        const spf = records.find(r => r.record === 'SPF' && r.type === 'TXT');
+        const dkim = records.find(r => r.record === 'DKIM');
+        const dmarc = records.find(r => r.record === 'DMARC' || r.name?.includes('_dmarc'));
+
+        if (spf) {
+          requiredRecords.spf.value = spf.value;
+          requiredRecords.spf.host = spf.name;
+          requiredRecords.spf.verified = spf.status === 'verified';
+          requiredRecords.spf.instructions = `Add a TXT record to your DNS:\n  Host: ${spf.name}\n  Value: ${spf.value}\n  Status: ${spf.status}`;
+        }
+        if (dkim) {
+          requiredRecords.dkim.value = dkim.value;
+          requiredRecords.dkim.host = dkim.name;
+          requiredRecords.dkim.verified = dkim.status === 'verified';
+          requiredRecords.dkim.instructions = `Add a CNAME record to your DNS:\n  Host: ${dkim.name}\n  Value: ${dkim.value}\n  Status: ${dkim.status}`;
+        }
+        if (dmarc) {
+          requiredRecords.dmarc.value = dmarc.value;
+          requiredRecords.dmarc.host = dmarc.name;
+          requiredRecords.dmarc.verified = dmarc.status === 'verified';
+          requiredRecords.dmarc.instructions = `Add a TXT record to your DNS:\n  Host: ${dmarc.name}\n  Value: ${dmarc.value}\n  Status: ${dmarc.status}`;
+        }
+      }
+
+      // Check legacy/status fields if records parser didn't match
       const spfData = statusData.spf as Record<string, string> | undefined;
       const dkimData = statusData.dkim as Record<string, string> | undefined;
       const dmarcData = statusData.dmarc as Record<string, string> | undefined;
@@ -104,6 +142,25 @@ export async function checkDomainDnsStatus(domainId: string): Promise<DomainDnsS
     overallStatus = 'not_configured';
   }
 
+  // Persist updated records and verification status to database
+  await db.sendingDomain.updateMany({
+    where: { id: domainId },
+    data: {
+      spfRecord: requiredRecords.spf.value,
+      spfVerified: requiredRecords.spf.verified,
+      spfStatus: requiredRecords.spf.verified ? 'verified' : 'pending',
+      dkimRecord: requiredRecords.dkim.value,
+      dkimVerified: requiredRecords.dkim.verified,
+      dkimStatus: requiredRecords.dkim.verified ? 'verified' : 'pending',
+      dmarcRecord: requiredRecords.dmarc.value,
+      dmarcVerified: requiredRecords.dmarc.verified,
+      dmarcStatus: requiredRecords.dmarc.verified ? 'verified' : 'pending',
+      status: allVerified ? 'verified' : (someVerified ? 'verifying' : domain.status),
+      lastDnsCheckAt: new Date(),
+      ...(allVerified ? { lastVerifiedAt: new Date() } : {}),
+    },
+  });
+
   return {
     domain: domain.domain,
     spf: requiredRecords.spf,
@@ -120,6 +177,7 @@ export async function checkDomainDnsStatus(domainId: string): Promise<DomainDnsS
 export async function updateDomainDnsStatus(
   domainId: string,
   status: { spfVerified?: boolean; dkimVerified?: boolean; dmarcVerified?: boolean },
+  organizationId?: string,
 ): Promise<void> {
   const updates: Record<string, unknown> = { lastDnsCheckAt: new Date() };
   if (status.spfVerified !== undefined) updates.spfVerified = status.spfVerified;
@@ -132,5 +190,8 @@ export async function updateDomainDnsStatus(
     updates.lastVerifiedAt = new Date();
   }
 
-  await db.sendingDomain.update({ where: { id: domainId }, data: updates });
+  await db.sendingDomain.updateMany({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+    data: updates,
+  });
 }

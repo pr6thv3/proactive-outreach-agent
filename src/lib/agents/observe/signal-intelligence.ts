@@ -162,7 +162,13 @@ export class SignalIntelligenceAgent extends BaseAgent<SignalIntelligenceInput, 
 
   async execute(input: SignalIntelligenceInput, context: AgentContext): Promise<SignalIntelligenceOutput> {
     const signals = input.existingSignals || context.signals;
-    const scrapeData = await db.scrapeData.findMany({ where: { leadId: context.leadId, status: 'completed' } });
+    const scrapeData = await db.scrapeData.findMany({
+      where: {
+        leadId: context.leadId,
+        ...(context.organizationId ? { organizationId: context.organizationId } : {}),
+        status: 'completed',
+      },
+    });
 
     // 1. Try LLM-based signal intelligence (highest quality)
     let intelligences: SignalIntelligence[] = [];
@@ -172,7 +178,7 @@ export class SignalIntelligenceAgent extends BaseAgent<SignalIntelligenceInput, 
       const zai = await ZAI.create();
 
       const contextParts = [
-        ...signals.map(s => `[${s.type}] ${s.content} (relevance: ${s.relevance}, confidence: ${s.confidence})`),
+        ...signals.map(s => `[${s.type}] ${s.content} (relevance: ${s.relevance}, confidence: ${s.confidence}${s.sourceUrl ? `, source: ${s.sourceTitle || s.sourceUrl} - ${s.sourceUrl}` : ', source: uncited'})`),
         input.additionalContext || '',
         context.lead.company ? `Company: ${context.lead.company}` : '',
         context.lead.title ? `Title: ${context.lead.title}` : '',
@@ -261,15 +267,21 @@ Return a JSON array of at least 2 signals. Prioritize signals that answer "WHY N
     for (const intel of intelligences) {
       const config = URGENCY_DECAY[intel.signal_type] || URGENCY_DECAY.pain_point;
       const pitchTemplate = PITCH_ANGLES[intel.signal_type] || PITCH_ANGLES.pain_point;
+      const evidenceSignal = signals
+        .filter(signal => signal.sourceUrl)
+        .sort((a, b) => (b.confidence * (b.urgency || b.relevance || 0)) - (a.confidence * (a.urgency || a.relevance || 0)))[0];
 
       await db.signal.create({
         data: {
+          organizationId: context.organizationId,
           type: intel.signal_type,
           content: intel.reasoning,
           source: 'signal_intelligence',
           relevance: intel.urgency,
           confidence: intel.confidence,
           rawSnippet: input.additionalContext?.slice(0, 500) || null,
+          sourceUrl: evidenceSignal?.sourceUrl || null,
+          sourceTitle: evidenceSignal?.sourceTitle || null,
           urgency: intel.urgency,
           reasoning: intel.reasoning,
           recommendedPitchAngle: intel.recommended_pitch_angle || pitchTemplate.angle,
@@ -306,6 +318,7 @@ Return a JSON array of at least 2 signals. Prioritize signals that answer "WHY N
     // 4. Log activity
     await db.activity.create({
       data: {
+        organizationId: context.organizationId,
         type: 'signal_detected',
         description: `Signal intelligence: ${intelligences.length} signals detected. Top: ${topPriority?.signal_type || 'none'} (urgency: ${(topPriority?.urgency || 0).toFixed(2)}). Action: ${recommendedAction}`,
         phase: 'observe',

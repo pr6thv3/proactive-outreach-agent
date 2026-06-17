@@ -92,10 +92,13 @@ const ACTION_ROLES: Record<OrchestrateAction['action'], WorkspaceRole> = {
 };
 
 export async function POST(request: NextRequest) {
-  const traceId = createTraceId();
+  let traceId = createTraceId();
   try {
     const context = await requireWorkspace();
     const raw = await request.json();
+    if (typeof raw?.traceId === 'string' && raw.traceId.trim()) {
+      traceId = raw.traceId.trim();
+    }
     const parsed = ActionSchema.safeParse(raw);
 
     if (!parsed.success) {
@@ -150,7 +153,7 @@ async function handleAction(action: OrchestrateAction, context: UserContext, tra
       return sendMessageAction(action, context, traceId);
     case 'classify_reply':
     case 'run_reeval':
-      return classifyReplyAction(action, context);
+      return classifyReplyAction(action, context, traceId);
     case 'start_autonomous_cycle':
     case 'run_autonomous_cycle':
       return startAutonomousCycleAction(action, context, traceId);
@@ -388,5 +391,6 @@ function isQueuedResult(result: unknown) {
   if (!result || typeof result !== 'object') return false;
   if ('backend' in result && 'jobId' in result) return true;
   if ('jobs' in result) return true;
+  if ('job' in result && (result as { job?: unknown }).job) return true;
   return false;
 }

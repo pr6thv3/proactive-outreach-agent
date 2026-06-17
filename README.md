@@ -1,6 +1,18 @@
-# Proactive Outreach Agent
+# Proactive Outreach Agent (Signal-Driven Outreach Operating System)
 
 An intelligent AI-powered sales outreach platform that automates lead discovery, signal intelligence, personalized email generation, and results tracking. Built with Next.js, TypeScript, Prisma, and Resend for production-grade email delivery.
+
+## 💡 The Product Wedge
+**“AI outbound that knows *why now*, not just *who* to email.”**
+
+Instead of bulk email blasts or generic personalization, this platform leverages timely, cited buying signals to ensure outreach is relevant, contextual, and high-converting.
+
+## 🎯 30-Day Beta Scope
+The 30-day beta focuses on hardening a controlled **20-lead outreach loop**:
+```
+20 leads -> cited signals -> ranked top 5 -> AI drafts -> approval -> send-readiness -> safe send/block -> jobs/webhooks -> results loop
+```
+All broader features (Stripe billing, CRMs/calendars, Telegram/Slack integrations, LinkedIn automation, external enrichment vendors like Apollo/Hunter/Clay) are deferred and tracked in [BACKLOG.md](file:///C:/Users/Preethve/proactive-outreach-agent/BACKLOG.md).
 
 ## 🎯 What It Does
 

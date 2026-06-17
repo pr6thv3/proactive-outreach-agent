@@ -20,8 +20,10 @@ export interface ReputationScore {
 /**
  * Calculate the reputation score for a sending domain
  */
-export async function calculateReputation(domainId: string): Promise<ReputationScore> {
-  const domain = await db.sendingDomain.findUnique({ where: { id: domainId } });
+export async function calculateReputation(domainId: string, organizationId?: string): Promise<ReputationScore> {
+  const domain = await db.sendingDomain.findFirst({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+  });
   if (!domain) throw new Error(`Domain ${domainId} not found`);
 
   let score = 100; // Start at 100, deduct for issues
@@ -113,8 +115,10 @@ export async function calculateReputation(domainId: string): Promise<ReputationS
 /**
  * Record a daily reputation snapshot for trend tracking
  */
-export async function recordDailySnapshot(domainId: string): Promise<void> {
-  const domain = await db.sendingDomain.findUnique({ where: { id: domainId } });
+export async function recordDailySnapshot(domainId: string, organizationId?: string): Promise<void> {
+  const domain = await db.sendingDomain.findFirst({
+    where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+  });
   if (!domain) return;
 
   const today = new Date().toISOString().split('T')[0];
@@ -125,6 +129,7 @@ export async function recordDailySnapshot(domainId: string): Promise<void> {
 
   const events = await db.emailEvent.findMany({
     where: {
+      ...(organizationId || domain.organizationId ? { organizationId: organizationId || domain.organizationId || undefined } : {}),
       domainId,
       createdAt: { gte: todayStart, lt: todayEnd },
     },
@@ -142,6 +147,7 @@ export async function recordDailySnapshot(domainId: string): Promise<void> {
   const positiveReplies = await db.replyClassification.count({
     where: {
       createdAt: { gte: todayStart, lt: todayEnd },
+      ...(organizationId || domain.organizationId ? { organizationId: organizationId || domain.organizationId || undefined } : {}),
       category: 'interested',
     },
   });
@@ -156,12 +162,13 @@ export async function recordDailySnapshot(domainId: string): Promise<void> {
   const positiveReplyRate = replied > 0 ? positiveReplies / replied : 0;
 
   // Calculate reputation score
-  const reputation = await calculateReputation(domainId);
+  const reputation = await calculateReputation(domainId, organizationId || domain.organizationId || undefined);
 
   // Upsert the daily snapshot
   await db.reputationSnapshot.upsert({
     where: { domainId_date: { domainId, date: today } },
     create: {
+      organizationId: organizationId || domain.organizationId,
       domainId,
       date: today,
       emailsSent: sent,
@@ -200,8 +207,8 @@ export async function recordDailySnapshot(domainId: string): Promise<void> {
   });
 
   // Update the domain's reputation score
-  await db.sendingDomain.update({
-    where: { id: domainId },
+  await db.sendingDomain.updateMany({
+    where: { id: domainId, ...(organizationId || domain.organizationId ? { organizationId: organizationId || domain.organizationId || undefined } : {}) },
     data: { reputationScore: reputation.score },
   });
 }
@@ -209,7 +216,7 @@ export async function recordDailySnapshot(domainId: string): Promise<void> {
 /**
  * Get reputation trend over time
  */
-export async function getReputationTrend(domainId: string, days: number = 30): Promise<Array<{
+export async function getReputationTrend(domainId: string, days: number = 30, organizationId?: string): Promise<Array<{
   date: string;
   reputationScore: number;
   deliveryRate: number;
@@ -218,7 +225,7 @@ export async function getReputationTrend(domainId: string, days: number = 30): P
   replyRate: number;
 }>> {
   const snapshots = await db.reputationSnapshot.findMany({
-    where: { domainId },
+    where: { domainId, ...(organizationId ? { organizationId } : {}) },
     orderBy: { date: 'desc' },
     take: days,
   });
@@ -236,8 +243,8 @@ export async function getReputationTrend(domainId: string, days: number = 30): P
 /**
  * Check if sending should be paused for a domain
  */
-export async function shouldPauseSending(domainId: string): Promise<{ pause: boolean; reason?: string }> {
-  const reputation = await calculateReputation(domainId);
+export async function shouldPauseSending(domainId: string, organizationId?: string): Promise<{ pause: boolean; reason?: string }> {
+  const reputation = await calculateReputation(domainId, organizationId);
   if (reputation.shouldPause) {
     return { pause: true, reason: reputation.pauseReason };
   }

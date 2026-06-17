@@ -1,12 +1,11 @@
 // ─── API: Stats ───────────────────────────────────────
 // Production dashboard statistics with scoring, signal intelligence, memory, and queue stats
 
-import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { JobQueue } from '@/lib/agents/infrastructure/job-queue';
 import { getPipelineMetrics } from '@/lib/agents/infrastructure/observability';
 import { requireWorkspace } from '@/lib/auth/context';
 import { createTraceId, handleApiError, ok } from '@/lib/api/responses';
+import { getCitationQuality } from '@/lib/agents/think/evidence';
 
 export async function GET() {
   const traceId = createTraceId();
@@ -109,6 +108,9 @@ export async function GET() {
       orderBy: { createdAt: 'desc' },
     });
 
+    const deliverability = await getDeliverabilityStats(organizationId);
+    const resultsLoop = await getResultsMetrics(organizationId, deliverability);
+
     return ok({
         leads: {
           total: totalLeads, new: newLeads, enriched: enrichedLeads, scored: scoredLeads,
@@ -133,6 +135,15 @@ export async function GET() {
           urgency: { high: highUrgencySignals, medium: medUrgencySignals, low: lowUrgencySignals },
           topSignals: topSignals.map(s => ({
             type: s.type, urgency: s.urgency, content: s.content.slice(0, 80),
+            confidence: s.confidence,
+            sourceUrl: s.sourceUrl,
+            sourceTitle: s.sourceTitle,
+            citationQuality: getCitationQuality({
+              source: s.source,
+              confidence: s.confidence,
+              sourceUrl: s.sourceUrl || undefined,
+              sourceTitle: s.sourceTitle || undefined,
+            }),
             recommendedPitchAngle: s.recommendedPitchAngle,
             lead: s.lead?.name, company: s.lead?.company, priorityTier: s.lead?.priorityTier,
           })),
@@ -151,8 +162,9 @@ export async function GET() {
         pipelineMetrics,
 
         // ─── Deliverability & Results Metrics ───
-        deliverability: await getDeliverabilityStats(organizationId),
-        results: await getResultsMetrics(organizationId),
+        deliverability,
+        resultsLoop,
+        results: resultsLoop,
       },
     traceId);
   } catch (error) {
@@ -198,26 +210,27 @@ async function getDeliverabilityStats(organizationId: string) {
         openRate: d.openRate,
         fromEmail: d.fromEmail,
       })),
-      metrics: {
-        totalSent: eventsSent,
-        totalDelivered: eventsDelivered,
-        totalBounced: eventsBounced,
-        totalOpened: eventsOpened,
-        totalClicked: eventsClicked,
-        totalComplained: eventsComplained,
-        deliveryRate: (deliveryRate * 100).toFixed(1),
-        bounceRate: (bounceRate * 100).toFixed(1),
-        openRate: (openRate * 100).toFixed(1),
-        clickRate: (clickRate * 100).toFixed(1),
-        complaintRate: (complaintRate * 100).toFixed(2),
-      },
+      totalSent: eventsSent,
+      totalDelivered: eventsDelivered,
+      totalBounced: eventsBounced,
+      totalOpened: eventsOpened,
+      totalClicked: eventsClicked,
+      totalComplained: eventsComplained,
+      deliveryRate: deliveryRate * 100,
+      bounceRate: bounceRate * 100,
+      openRate: openRate * 100,
+      clickRate: clickRate * 100,
+      complaintRate: complaintRate * 100,
     };
   } catch {
-    return { domains: [], metrics: { totalSent: 0, totalDelivered: 0, totalBounced: 0, totalOpened: 0, totalClicked: 0, totalComplained: 0, deliveryRate: '0', bounceRate: '0', openRate: '0', clickRate: '0', complaintRate: '0' } };
+    return { domains: [], totalSent: 0, totalDelivered: 0, totalBounced: 0, totalOpened: 0, totalClicked: 0, totalComplained: 0, deliveryRate: 0, bounceRate: 0, openRate: 0, clickRate: 0, complaintRate: 0 };
   }
 }
 
-async function getResultsMetrics(organizationId: string) {
+async function getResultsMetrics(
+  organizationId: string,
+  deliverability: Awaited<ReturnType<typeof getDeliverabilityStats>>,
+) {
   try {
     // The RESULTS LOOP: signals found → emails generated → emails sent → replies → meetings → revenue
     const [
@@ -244,17 +257,17 @@ async function getResultsMetrics(organizationId: string) {
 
     return {
       signalsFound,
-      emailsGenerated,
-      emailsSent,
-      emailsDelivered,
-      repliesReceived,
-      interestedLeads,
-      meetingsBooked,
-      replyRate: (replyRate * 100).toFixed(1),
-      positiveReplyRate: (positiveReplyRate * 100).toFixed(1),
-      conversionRate: (conversionRate * 100).toFixed(2),
+      generatedEmails: emailsGenerated,
+      sentEmails: emailsSent,
+      replies: repliesReceived,
+      meetings: meetingsBooked,
+      deliveryRate: deliverability.deliveryRate,
+      replyRate: replyRate * 100,
+      positiveReplyRate: positiveReplyRate * 100,
+      bounceRate: deliverability.bounceRate,
+      conversionRate: conversionRate * 100,
     };
   } catch {
-    return { signalsFound: 0, emailsGenerated: 0, emailsSent: 0, emailsDelivered: 0, repliesReceived: 0, interestedLeads: 0, meetingsBooked: 0, replyRate: '0', positiveReplyRate: '0', conversionRate: '0' };
+    return { signalsFound: 0, generatedEmails: 0, sentEmails: 0, replies: 0, meetings: 0, deliveryRate: 0, replyRate: 0, positiveReplyRate: 0, bounceRate: 0, conversionRate: 0 };
   }
 }

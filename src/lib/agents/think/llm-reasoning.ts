@@ -5,7 +5,7 @@ import { BaseAgent } from '../base';
 import { AgentContext, ThinkOutput, EmailSequence, CampaignConfig } from '../types';
 
 interface LLMReasoningInput {
-  signals?: Array<{ type: string; content: string; relevance: number }>;
+  signals?: Array<{ type: string; content: string; relevance: number; confidence?: number; sourceUrl?: string; sourceTitle?: string; citationQuality?: string }>;
   objective?: string;
   campaignConfig?: CampaignConfig;
 }
@@ -41,7 +41,7 @@ LEAD:
 - Company: ${company}
 
 TOP SIGNALS:
-${rankedSignals.map((s, i) => `${i + 1}. [${s.type}] ${s.content} (relevance: ${s.relevance})`).join('\n')}
+${rankedSignals.map((s, i) => `${i + 1}. [${s.type}] ${s.content} (relevance: ${s.relevance}, confidence: ${s.confidence ?? 'unknown'}, citation: ${s.sourceUrl ? `${s.sourceTitle || s.sourceUrl} - ${s.sourceUrl}` : 'uncited'})`).join('\n')}
 
 CAMPAIGN CONTEXT:
 - Goal: ${config?.goal || 'Book discovery calls'}
@@ -65,6 +65,7 @@ Each email must have:
 - End each email with: Best, ${senderName}
 
 IMPORTANT: Do NOT include any unsubscribe text — that's added separately.
+EVIDENCE RULE: Do not mention funding, hiring, traffic drops, tech stack, product launches, competitors, or other factual company events unless the claim is directly supported by a TOP SIGNAL that has a citation URL. Uncited signals can only shape general tone, not factual claims.
 
 Also provide:
 - strategy: The overall approach used
@@ -89,7 +90,7 @@ JSON format:
 
       const completion = await zai.chat.completions.create({
         messages: [
-          { role: 'system', content: 'You write high-converting cold emails. Always respond with valid JSON.' },
+          { role: 'system', content: 'You write high-converting cold emails. Always respond with valid JSON. Never invent company facts; factual claims must be supported by cited signals.' },
           { role: 'user', content: prompt },
         ],
         temperature: 0.7,
@@ -120,20 +121,20 @@ JSON format:
   }
 }
 
-function generateTemplateSequence(context: AgentContext, signals: Array<{ type: string; content: string; relevance: number }>, config?: CampaignConfig): ThinkOutput {
+function generateTemplateSequence(context: AgentContext, signals: Array<{ type: string; content: string; relevance: number; sourceUrl?: string; sourceTitle?: string }>, config?: CampaignConfig): ThinkOutput {
   const firstName = context.lead.name.split(' ')[0] || 'there';
   const company = context.lead.company || 'your company';
   const senderName = config?.senderName || 'Alex';
   const cta = config?.cta || 'Would you be open to a quick 15-minute chat this week?';
-  const strongest = signals[0];
+  const strongest = signals.find(signal => signal.sourceUrl);
 
   let strategy = 'value-first';
   let hook = `Hi ${firstName}, I noticed some exciting developments at ${company}.`;
   let angle = `Relevant solutions for ${company}`;
 
-  if (strongest?.type === 'funding') { strategy = 'congratulatory'; hook = `Hi ${firstName}, congratulations on the recent funding round at ${company}!`; angle = 'Growth partnership'; }
-  else if (strongest?.type === 'pain_point') { strategy = 'pain-point-driven'; hook = `Hi ${firstName}, I understand ${company} might be facing challenges with scaling.`; angle = 'Addressing key challenges'; }
-  else if (strongest?.type === 'hiring') { strategy = 'value-first'; hook = `Hi ${firstName}, I saw ${company} is hiring — exciting growth!`; angle = 'Scaling solutions'; }
+  if (strongest?.type === 'funding') { strategy = 'congratulatory'; hook = `Hi ${firstName}, I saw a cited funding signal for ${company}.`; angle = 'Growth partnership'; }
+  else if (strongest?.type === 'pain_point') { strategy = 'pain-point-driven'; hook = `Hi ${firstName}, I noticed a cited signal that may point to a priority at ${company}.`; angle = 'Addressing key challenges'; }
+  else if (strongest?.type === 'hiring') { strategy = 'value-first'; hook = `Hi ${firstName}, I saw a cited hiring signal for ${company}.`; angle = 'Scaling solutions'; }
 
   const emailSequence: EmailSequence = [
     { subject: `${firstName}, quick question about ${company}`, body: `${hook}\n\nI came across your work at ${company} and thought there might be a natural fit between what you're working on and what we do.\n\n${cta}\n\nBest,\n${senderName}`, sequencePos: 0, type: 'initial' },
