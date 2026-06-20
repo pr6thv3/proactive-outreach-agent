@@ -92,3 +92,6 @@ git-ssh.sh
 paramiko-ssh.py
 package-lock.json
 prisma/schema.sqlite.prisma
+
+# clerk configuration (can include secrets)
+/.clerk/

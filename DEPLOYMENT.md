@@ -1,68 +1,103 @@
-# Production Deployment Guide
+# Production & Staging Deployment Guide
 
-This guide details the steps required to deploy the Proactive Outreach Agent to production (Next.js Standalone + Background Worker).
+This guide details the steps required to deploy the Proactive Outreach Agent to production/staging environments (Next.js Standalone App + Background Worker).
+
+---
 
 ## 🏗️ 1. Infrastructure Requirements
 
-- **Application Hosting**: Next.js App Router (e.g., Vercel, Railway, Fly.io, or Render).
-- **Database**: PostgreSQL database.
-- **Cache / Job Broker**: Redis (required for BullMQ background workers).
-- **Email Delivery Service**: Resend (configured with verified domain records).
+- **Application Hosting**: Any platform supporting Next.js Standalone (e.g., Railway, Render, Fly.io, Vercel).
+- **Database**: PostgreSQL (v14+) database with `pgvector` extension enabled.
+- **Cache / Job Broker**: Redis (v6+) database for BullMQ background queues.
+- **Email Delivery**: Resend account with a verified sending domain.
 
 ---
 
-## 🗄️ 2. Database Migration
+## 🔑 2. Required Environment Variables
 
-Before deploying code updates, apply database changes to the production database:
+Ensure the following variables are configured in your hosting platform. For detailed instructions on how to obtain these keys, see [STAGING_REQUIRED_VARS.md](file:///C:/Users/Preethve/proactive-outreach-agent/STAGING_REQUIRED_VARS.md):
 
-1. Ensure the production environment variables (`DATABASE_URL`) are exported.
-2. Run Prisma migration commands:
-   ```bash
-   npx prisma migrate deploy
-   ```
-3. Generate the Prisma Client:
-   ```bash
-   npx prisma generate
-   ```
+```bash
+DATABASE_URL=
+REDIS_URL=
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=
+RESEND_API_KEY=
+RESEND_WEBHOOK_SECRET=
+NEXT_PUBLIC_BASE_URL=
+DEFAULT_SENDER_EMAIL=
+DEFAULT_SENDER_NAME=
+DEFAULT_REPLY_TO=
+OPENAI_API_KEY=
+AUTH_DEV_BYPASS=false
+```
 
 ---
 
-## 📦 3. Build the Application
+## 🛠️ 3. Deployment Commands
 
-Build the Next.js app for production. The build output is configured to use **Standalone Server Mode** (generating a minimal server footprint inside `.next/standalone`):
-
+### Build Phase
+To compile the standalone server and prepare static assets, execute the build command:
 ```bash
 npm run build
 ```
+This runs `next build` followed by a post-build asset copying script (`node scripts/copy-standalone-assets.mjs`).
 
-This command:
-1. Compiles the React/Next.js routes and assets.
-2. Copies standing assets to `.next/standalone/public` and `.next/standalone/.next/static` via `scripts/copy-standalone-assets.mjs`.
-
----
-
-## 🚀 4. Run the Standalone Web Server
-
-Start the standalone web server in your production environment:
-
+### Run Phase (Web Process)
+To start the Next.js frontend and API route handler:
 ```bash
-PORT=3000 node .next/standalone/server.js
+node .next/standalone/server.js
 ```
+*(Or if your platform uses Procfile, it will auto-detect the `web` process)*
 
-Ensure all required production environment variables (documented in [ENVIRONMENT.md](file:///C:/Users/Preethve/proactive-outreach-agent/ENVIRONMENT.md)) are provided to this process.
-
----
-
-## ⚙️ 5. Run the Background Worker
-
-The background worker must run as a separate, persistent daemon alongside the main Next.js web application:
-
+### Run Phase (Worker Process)
+To start the persistent BullMQ background queue consumer:
 ```bash
 npm run worker
 ```
+*(Or if your platform uses Procfile, it will auto-detect the `worker` process)*
 
-- This starts the worker processor (`scripts/worker.ts` via `tsx`) which listens to BullMQ queues.
-- Ensure the worker has access to both `DATABASE_URL` and `REDIS_URL`.
-- In a platform like Railway or Render, deploy the repository twice:
-  1. Once as a **Web Service** running `node .next/standalone/server.js`.
-  2. Once as a **Background worker/Worker Service** running `npm run worker`.
+---
+
+## 🗄️ 4. Database Setup & Migration
+
+Before launching the web or worker processes, run the database migrations:
+
+```bash
+npx prisma migrate deploy
+npx prisma generate
+```
+
+---
+
+## 📬 5. Resend Email & Webhook Setup
+
+### Custom Domain DNS Configuration
+1. In your **Resend Dashboard**, navigate to **Domains** > **Add Domain**.
+2. Add your outreach subdomain (e.g., `outbound.yourcompany.com`).
+3. Add the generated DNS records to your domain provider:
+   - **SPF (TXT)**: Auth policies for sender validation.
+   - **DKIM (TXT)**: Cryptographic signature to authenticate origin.
+   - **DMARC (TXT)**: Rejection/quarantine policies.
+   - **MX**: Inbound mail routing.
+4. Verify domain status. Ensure it reads **Verified** in Resend before sending.
+
+### Webhook Event Handling
+1. In the **Resend Dashboard**, go to **Webhooks** > **Add Webhook**.
+2. Set Endpoint URL to: `https://<your-app-domain>/api/webhooks/resend`
+3. Select the following events:
+   - `email.sent`
+   - `email.delivered`
+   - `email.bounced`
+   - `email.complained`
+4. Copy the webhook signing secret (starts with `whsec_`) and save it as `RESEND_WEBHOOK_SECRET` in your server's environment variables.
+
+---
+
+## 🩺 6. Monitoring & Health Check Endpoints
+
+- **Web Server Health**: Standard Next.js server requests.
+- **Job Health API**: `GET /api/jobs/health`
+  - Returns real-time connection status to Redis, active/pending/failed job counts per queue, and stale job warnings.
+  - Useful for wire-up to platform uptime monitors (e.g., Railway or Render TCP/HTTP checks).
+

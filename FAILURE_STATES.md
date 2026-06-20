@@ -86,3 +86,88 @@ This guide documents the design patterns, test coverage, and recovery playbooks 
 - **Recovery / Testing**:
   - Daily counts reset automatically at midnight UTC when the date changes (`YYYY-MM-DD`).
   - For testing/simulation, manually update the date or count in the database to trigger/bypass the block.
+
+---
+
+## 8. Missing Sender Identity
+
+- **Symptom**: No sender account is attached to a campaign or workspace pool, or all pooled senders have been deleted or deactivated.
+- **Handling**:
+  - `evaluateSendReadiness` flags the absence of eligible active senders as a `sender_exists` block.
+  - The orchestrator refuses to process the send, returning a structured `Cannot send` response.
+  - The Approval Queue UI displays a red "Blocked" indicator with the reason "No sender is available for this workspace/campaign."
+- **Recovery**:
+  - Navigate to the Deliverability panel and create or reactivate at least one `SenderAccount` with `status: 'active'`.
+  - Ensure the sender is linked to a verified `SendingDomain`.
+
+---
+
+## 9. Unapproved Draft
+
+- **Symptom**: A message is still in `generated` or `draft` status and someone attempts to send it.
+- **Handling**:
+  - The `evaluateSendReadiness` evaluator checks `message.status === 'approved'` via the `message_approved` check.
+  - If the message is not approved, the check returns a `block` outcome with the current status value.
+  - The send button is disabled in the UI, and the API returns a structured error.
+- **Recovery**:
+  - Open the Approval Queue, review the draft, optionally edit it, and click **Approve**.
+  - Only `generated` or `draft` messages can transition to `approved`.
+
+---
+
+## 10. Webhook Delay / Async Processing Lag
+
+- **Symptom**: A Resend webhook event arrives but the corresponding dashboard update is delayed.
+- **Handling**:
+  - Webhook events are enqueued as `webhook-processing` background jobs to avoid API timeout constraints.
+  - If Redis is offline, the job is saved to the database with `queued_without_redis: true`.
+  - The Job Health panel shows the webhook processing job in the pending queue.
+- **Recovery**:
+  - Ensure the worker process is running (`npm run worker`).
+  - Check the Job Health dashboard for pending webhook-processing jobs.
+  - Webhook jobs are processed in order; a temporary delay is expected under high load.
+
+---
+
+## 11. Failed Job
+
+- **Symptom**: A background job (send-email, scrape, etc.) fails after exhausting retry attempts.
+- **Handling**:
+  - The worker records the error message and full structured result in the `JobQueue` record.
+  - Failed jobs are cataloged with `status: 'failed'` and include the `error` field, `traceId`, and `attempt` count.
+  - The Job Health panel surfaces failed job counts and their error messages.
+- **Recovery**:
+  - Review the job's `error` field and `traceId` to diagnose the root cause.
+  - Common causes: Resend API rate limiting (429), network timeouts, invalid recipient.
+  - Manually reset the job status to `pending` to retry, or address the underlying issue and re-trigger.
+
+---
+
+## 12. Stale Running Job
+
+- **Symptom**: A background job remains in `running` status for longer than 15 minutes without completing.
+- **Handling**:
+  - The Job Health endpoint calculates job age from `startedAt` and flags jobs older than 15 minutes as stale.
+  - The `worker_queue_health` readiness check emits a `warn` status when stale running jobs are detected.
+  - The UI displays the stale count and oldest job age in the Job Health panel.
+- **Recovery**:
+  - Check if the worker process is alive and responsive.
+  - Review the stale job's `traceId` in application logs.
+  - If the worker crashed, restart it — the job will remain in `running` state until manually reset to `pending` or marked `failed`.
+
+---
+
+## UI 5-Question Checklist
+
+Every failure state must produce a UI response that clearly answers these 5 questions:
+
+| # | Question | Where to find the answer |
+|---|----------|--------------------------|
+| 1 | **What happened?** | The `label` and `reason` fields on the readiness check, or the `error` field on a failed job |
+| 2 | **Is sending blocked or only warned?** | The `status` field: `block` = cannot send, `warn` = can send with review |
+| 3 | **Why?** | The `reason` field provides a human-readable explanation |
+| 4 | **What should the user do next?** | The `remediationTarget` field points to the relevant UI panel (`lead_record`, `deliverability`, `campaign_settings`, `worker`, `job_health`, `approval_queue`) |
+| 5 | **What is the traceId?** | The `traceId` field on the readiness result, job record, or API response |
+
+**No silent failures are allowed.** If a failure state does not produce answers to all 5 questions, it is a bug.
+

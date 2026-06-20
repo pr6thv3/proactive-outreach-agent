@@ -1,5 +1,8 @@
 # Backlog: Post-Beta Features
 
+> [!CAUTION]
+> **Feature Freeze Active** (effective 2026-06-19). No items from this backlog may be implemented until the freeze is lifted. See [FEATURE_FREEZE.md](./FEATURE_FREEZE.md) for allowed change categories and lift conditions.
+
 This file contains features and integrations that are out of scope for the 30-Day Beta (the controlled 20-lead outreach loop) and are deferred for subsequent implementation.
 
 ## Excluded Items
