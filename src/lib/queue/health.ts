@@ -88,7 +88,8 @@ export async function getJobHealth(organizationId: string): Promise<JobHealth> {
   const redis = await checkRedisHealth();
   const staleBefore = new Date(Date.now() - STALE_RUNNING_MS);
 
-  const queueEntries = await Promise.all(QUEUE_NAMES.map(async (queueName) => {
+  const queueEntries: Array<readonly [string, QueueHealth]> = [];
+  for (const queueName of QUEUE_NAMES) {
     const whereQueue = {
       organizationId,
       OR: [
@@ -97,32 +98,30 @@ export async function getJobHealth(organizationId: string): Promise<JobHealth> {
       ],
     };
 
-    const [pending, running, completed, failed, dead, staleRunning, oldestPending] = await Promise.all([
-      db.jobQueue.count({ where: { ...whereQueue, status: 'pending' } }),
-      db.jobQueue.count({ where: { ...whereQueue, status: 'running' } }),
-      db.jobQueue.count({ where: { ...whereQueue, status: 'completed' } }),
-      db.jobQueue.count({ where: { ...whereQueue, status: 'failed' } }),
-      db.jobQueue.count({ where: { ...whereQueue, status: 'dead' } }),
-      db.jobQueue.count({
-        where: {
-          AND: [
-            whereQueue,
-            { status: 'running' },
-            {
-              OR: [
-                { startedAt: { lt: staleBefore } },
-                { startedAt: null, createdAt: { lt: staleBefore } },
-              ],
-            },
-          ],
-        },
-      }),
-      db.jobQueue.findFirst({
-        where: { ...whereQueue, status: 'pending' },
-        orderBy: { createdAt: 'asc' },
-        select: { createdAt: true },
-      }),
-    ]);
+    const pending = await db.jobQueue.count({ where: { ...whereQueue, status: 'pending' } });
+    const running = await db.jobQueue.count({ where: { ...whereQueue, status: 'running' } });
+    const completed = await db.jobQueue.count({ where: { ...whereQueue, status: 'completed' } });
+    const failed = await db.jobQueue.count({ where: { ...whereQueue, status: 'failed' } });
+    const dead = await db.jobQueue.count({ where: { ...whereQueue, status: 'dead' } });
+    const staleRunning = await db.jobQueue.count({
+      where: {
+        AND: [
+          whereQueue,
+          { status: 'running' },
+          {
+            OR: [
+              { startedAt: { lt: staleBefore } },
+              { startedAt: null, createdAt: { lt: staleBefore } },
+            ],
+          },
+        ],
+      },
+    });
+    const oldestPending = await db.jobQueue.findFirst({
+      where: { ...whereQueue, status: 'pending' },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
 
     const health: QueueHealth = {
       name: queueName,
@@ -135,8 +134,8 @@ export async function getJobHealth(organizationId: string): Promise<JobHealth> {
       oldestPendingJobAgeMs: oldestPending ? Date.now() - oldestPending.createdAt.getTime() : undefined,
     };
 
-    return [QUEUE_KEYS[queueName], health] as const;
-  }));
+    queueEntries.push([QUEUE_KEYS[queueName], health] as const);
+  }
 
   const queues = Object.fromEntries(queueEntries);
   const totals = Object.values(queues).reduce<JobHealth['totals']>((acc, q) => ({

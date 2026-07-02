@@ -7,6 +7,8 @@ import { AgentContext, ThinkOutput, CampaignConfig } from '../types';
 interface PitchStrategistInput {
   initialStrategy: ThinkOutput;
   campaignConfig?: CampaignConfig;
+  selectedStrategy?: string;
+  selectedStrategyConfidence?: number;
 }
 
 export class PitchStrategistAgent extends BaseAgent<PitchStrategistInput, ThinkOutput> {
@@ -23,6 +25,7 @@ export class PitchStrategistAgent extends BaseAgent<PitchStrategistInput, ThinkO
       const zai = await ZAI.create();
 
       const prompt = `Refine this outreach strategy with a more compelling angle.
+${input.selectedStrategy ? `You MUST incorporate the selected outreach strategy directive: "${input.selectedStrategy}" (Confidence: ${input.selectedStrategyConfidence ?? 'unknown'}) into the refined angle and message content.` : ''}
 
 CURRENT: ${strategy.strategy} — ${strategy.angle}
 LEAD: ${context.lead.name}, ${context.lead.title || 'Unknown'} at ${context.lead.company || 'Unknown'}
@@ -47,7 +50,7 @@ Improve the emailSequence. Keep the same JSON format as input. Return the full o
         const parsed = JSON.parse(jsonMatch[0]);
         return {
           ...strategy,
-          strategy: parsed.strategy || strategy.strategy,
+          strategy: parsed.strategy || input.selectedStrategy || strategy.strategy,
           angle: parsed.angle || strategy.angle,
           hook: parsed.hook || strategy.hook,
           emailSequence: parsed.emailSequence || strategy.emailSequence,
@@ -58,6 +61,10 @@ Improve the emailSequence. Keep the same JSON format as input. Return the full o
       if (process.env.NODE_ENV !== 'production') console.warn('[PitchStrategist] LLM failed:', error);
     }
 
-    return { ...strategy, angle: `${config?.targetAudience || context.lead.company || 'Industry'}: ${strategy.angle}` };
+    return {
+      ...strategy,
+      strategy: input.selectedStrategy || strategy.strategy,
+      angle: `${config?.targetAudience || context.lead.company || 'Industry'}: ${strategy.angle}`
+    };
   }
 }

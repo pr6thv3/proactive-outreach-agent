@@ -8,6 +8,8 @@ interface LLMReasoningInput {
   signals?: Array<{ type: string; content: string; relevance: number; confidence?: number; sourceUrl?: string; sourceTitle?: string; citationQuality?: string }>;
   objective?: string;
   campaignConfig?: CampaignConfig;
+  selectedStrategy?: string;
+  selectedStrategyConfidence?: number;
 }
 
 export class LLMReasoningAgent extends BaseAgent<LLMReasoningInput, ThinkOutput> {
@@ -51,6 +53,7 @@ CAMPAIGN CONTEXT:
 - CTA: ${cta}
 - Sender: ${senderName} (${senderEmail})
 - Tone: ${tone}
+${input.selectedStrategy ? `- Selected Strategy Directive: Use the outreach strategy "${input.selectedStrategy}" (Confidence: ${input.selectedStrategyConfidence ?? 'unknown'}) to shape the tone, angle, and core pitch of this sequence.` : ''}
 
 Generate 4 emails:
 1. Initial email: Personalized, references a signal, includes CTA
@@ -68,7 +71,7 @@ IMPORTANT: Do NOT include any unsubscribe text — that's added separately.
 EVIDENCE RULE: Do not mention funding, hiring, traffic drops, tech stack, product launches, competitors, or other factual company events unless the claim is directly supported by a TOP SIGNAL that has a citation URL. Uncited signals can only shape general tone, not factual claims.
 
 Also provide:
-- strategy: The overall approach used
+- strategy: The overall approach used (or "${input.selectedStrategy || 'value-first'}")
 - angle: The industry/persona angle
 - hook: The opening hook line used
 
@@ -101,7 +104,7 @@ JSON format:
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         return {
-          strategy: parsed.strategy || 'value-first',
+          strategy: parsed.strategy || input.selectedStrategy || 'value-first',
           angle: parsed.angle || `${company} approach`,
           hook: parsed.hook || `Hi ${firstName}, I noticed something interesting at ${company}.`,
           subject: parsed.emailSequence?.[0]?.subject || `Quick question about ${company}`,
@@ -117,7 +120,11 @@ JSON format:
     }
 
     // Template fallback with full sequence
-    return generateTemplateSequence(context, rankedSignals, config);
+    const fallback = generateTemplateSequence(context, rankedSignals, config);
+    if (input.selectedStrategy) {
+      fallback.strategy = input.selectedStrategy;
+    }
+    return fallback;
   }
 }
 

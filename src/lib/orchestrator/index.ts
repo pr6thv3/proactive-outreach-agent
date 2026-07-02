@@ -23,6 +23,8 @@ import { trackEdit, feedEditToMemory, updateEditOutcome } from '../agents/act/ed
 import { buildEvidenceSnapshot } from '../agents/think/evidence';
 import { db } from '@/lib/db';
 import { isLeadSafeToContact, parseCsv } from '@/lib/safety';
+import { StrategySelector } from '../strategy';
+import { evaluateRisk } from '../risk';
 import {
   AgentContext, AgentResult, ObserveOutput, ThinkOutput, ActOutput, ReEvalOutput,
   PipelineState, OrchestratorConfig, DEFAULT_CONFIG, SignalData, LeadData,
@@ -118,6 +120,94 @@ export class Orchestrator {
     const context = await this.buildContext(leadId, campaignId, organizationId, traceId);
     if (!context) return this.leadNotFound('ThinkPipeline');
 
+    const orgId = organizationId || context.organizationId;
+
+    // 1. Choose the best strategy
+    const strategyRecommendation = await StrategySelector.selectBestStrategyForLead(
+      leadId,
+      orgId
+    );
+    const selectedStrategy = strategyRecommendation?.strategy || 'persona-based';
+    const selectedStrategyConfidence = strategyRecommendation?.confidence ?? 0.5;
+
+    // 2. Resolve sending domain and senderId
+    let domainId: string | undefined;
+    let senderId: string | undefined;
+    if (campaignId && orgId) {
+      const poolEntry = await db.campaignSenderPool.findFirst({
+        where: {
+          campaignId,
+          enabled: true,
+          organizationId: orgId,
+          domainId: { not: null },
+        },
+      });
+      if (poolEntry?.domainId) {
+        domainId = poolEntry.domainId;
+      }
+      if (poolEntry?.senderId) {
+        senderId = poolEntry.senderId;
+      }
+    }
+    if (!domainId && orgId) {
+      const firstDomain = await db.sendingDomain.findFirst({
+        where: { organizationId: orgId },
+        orderBy: { status: 'desc' },
+      });
+      domainId = firstDomain?.id;
+    }
+
+    // 3. Call evaluateRisk and handle block state
+    const riskAssessment = await evaluateRisk({
+      organizationId: orgId || '',
+      domainId: domainId || 'default-domain',
+      campaignId,
+      leadId,
+      senderId,
+      strategyName: selectedStrategy,
+    });
+
+    if (riskAssessment.status === 'block') {
+      logger.warn('Risk assessment blocked THINK phase', {
+        leadId,
+        campaignId,
+        metadata: {
+          domainId,
+          remediation: riskAssessment.remediationSteps,
+        },
+      });
+
+      // Handle block state: mark status/result as blocked to prevent enqueuing
+      await db.lead.updateMany({
+        where: { id: leadId, ...(orgId ? { organizationId: orgId } : {}) },
+        data: { status: 'blocked' },
+      }).catch(() => {});
+
+      await db.activity.create({
+        data: {
+          type: 'risk_blocked',
+          description: `Outreach blocked by risk engine: ${riskAssessment.remediationSteps.join(', ')}`,
+          phase: 'think',
+          organizationId: orgId,
+          leadId,
+          metadata: JSON.stringify({
+            riskScore: riskAssessment.score,
+            remediation: riskAssessment.remediationSteps,
+          }),
+        },
+      }).catch(() => {});
+
+      return {
+        success: false,
+        data: null as unknown as ThinkOutput,
+        error: `Risk block: ${riskAssessment.remediationSteps.join(', ')}`,
+        durationMs: 0,
+        agentName: 'ThinkPipeline',
+        phase: 'think',
+        traceId,
+      };
+    }
+
     // Get top signal intelligence for pitch context
     const topSignal = context.signals
       .filter(s => s.urgency && s.urgency > 0)
@@ -127,6 +217,8 @@ export class Orchestrator {
       signals: context.signals,
       objective,
       campaignConfig: context.campaignConfig,
+      selectedStrategy,
+      selectedStrategyConfidence,
       ...(topSignal ? {
         topSignalType: topSignal.type,
         topUrgency: topSignal.urgency,
@@ -137,7 +229,12 @@ export class Orchestrator {
 
     if (!reasoningResult.success || !reasoningResult.data) return reasoningResult as AgentResult<ThinkOutput>;
 
-    const pitchResult = await pitchStrategist.run({ initialStrategy: reasoningResult.data, campaignConfig: context.campaignConfig }, context);
+    const pitchResult = await pitchStrategist.run({
+      initialStrategy: reasoningResult.data,
+      campaignConfig: context.campaignConfig,
+      selectedStrategy,
+      selectedStrategyConfidence,
+    }, context);
     const refined = pitchResult.success && pitchResult.data ? pitchResult.data : reasoningResult.data;
 
     const personalResult = await personalizer.run({ strategy: refined, campaignConfig: context.campaignConfig }, context);
@@ -146,6 +243,7 @@ export class Orchestrator {
     // Inject signal intelligence context into the final strategy
     const enrichedStrategy: ThinkOutput = {
       ...finalStrategy,
+      strategy: selectedStrategy,
       signalTypeUsed: topSignal?.type,
       urgencyAtGeneration: topSignal?.urgency,
       pitchAngleUsed: topSignal?.recommendedPitchAngle || finalStrategy.angle,
@@ -164,7 +262,7 @@ export class Orchestrator {
         body: enrichedStrategy.body,
         channel: enrichedStrategy.recommendedChannel || 'email',
         status: 'generated',
-        strategy: enrichedStrategy.strategy,
+        strategy: selectedStrategy,
         angle: enrichedStrategy.angle,
         tone: enrichedStrategy.tone,
         cta: enrichedStrategy.cta,
@@ -191,6 +289,7 @@ export class Orchestrator {
         signalTypeUsed: enrichedStrategy.signalTypeUsed,
         urgencyAtGeneration: enrichedStrategy.urgencyAtGeneration,
         pitchAngleUsed: enrichedStrategy.pitchAngleUsed,
+        strategy: selectedStrategy,
       },
     }).catch(() => { /* Field may not exist yet */ });
 

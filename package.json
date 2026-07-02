@@ -10,7 +10,7 @@
     "dev:worker": "tsx watch scripts/worker.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "tsx src/__tests__/smoke.test.ts && tsx src/__tests__/architecture.test.ts",
+    "test": "tsx src/__tests__/smoke.test.ts && tsx src/__tests__/architecture.test.ts && tsx src/__tests__/strategy.test.ts && tsx src/__tests__/risk.test.ts",
     "test:beta": "cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/beta-contracts.test.ts",
     "test:all": "npm run test && npm run test:beta",
     "test:staging": "cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/staging-acceptance.test.ts",

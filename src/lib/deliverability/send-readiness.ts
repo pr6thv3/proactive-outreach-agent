@@ -4,6 +4,7 @@ import { isOnDncList, validateEmail } from '@/lib/safety';
 import { canSendMore } from '@/lib/deliverability/warmup-manager';
 import { shouldPauseSending } from '@/lib/deliverability/reputation-tracker';
 import { getJobHealth, type JobHealth } from '@/lib/queue/health';
+import { evaluateRisk } from '@/lib/risk';
 
 export type ReadinessStatus = 'pass' | 'warn' | 'block';
 
@@ -312,6 +313,49 @@ export async function evaluateSendReadiness(params: {
       status: pause.pause ? 'block' : 'pass',
       reason: pause.pause ? `Sending paused: ${pause.reason}` : 'Domain reputation thresholds allow sending.',
       remediationTarget: pause.pause ? 'deliverability' : undefined,
+    });
+
+    // Execute the risk evaluation pipeline
+    const riskAssessment = await evaluateRisk({
+      organizationId: params.organizationId,
+      domainId: domain.id,
+      campaignId: campaign?.id,
+      leadId: lead?.id,
+      messageId: message.id,
+      senderId: sender?.id,
+      strategyName: message.strategy || undefined,
+    });
+
+    addCheck({
+      id: 'risk_evaluation_circuit_breaker',
+      label: 'Risk: Deliverability Circuit Breaker',
+      status: riskAssessment.checks.circuitBreaker.status,
+      reason: riskAssessment.checks.circuitBreaker.reason || 'Circuit breaker metrics are healthy.',
+      remediationTarget: riskAssessment.checks.circuitBreaker.status !== 'pass' ? 'deliverability' : undefined,
+    });
+
+    addCheck({
+      id: 'risk_evaluation_strategy',
+      label: 'Risk: Strategy and Spam Evaluation',
+      status: riskAssessment.checks.strategyRisk.status,
+      reason: riskAssessment.checks.strategyRisk.reason || 'Strategy and spam risks are low.',
+      remediationTarget: riskAssessment.checks.strategyRisk.status !== 'pass' ? 'lead_record' : undefined,
+    });
+
+    addCheck({
+      id: 'risk_evaluation_pacing',
+      label: 'Risk: Budget and Pacing',
+      status: riskAssessment.checks.pacingAndBudget.status,
+      reason: riskAssessment.checks.pacingAndBudget.reason || 'Campaign limits and pacing are compliant.',
+      remediationTarget: riskAssessment.checks.pacingAndBudget.status !== 'pass' ? 'campaign_settings' : undefined,
+    });
+
+    addCheck({
+      id: 'risk_evaluation_sender_pool',
+      label: 'Risk: Sender Pool Health',
+      status: riskAssessment.checks.senderPoolHealth.status,
+      reason: riskAssessment.checks.senderPoolHealth.reason || 'Sender pool health is high.',
+      remediationTarget: riskAssessment.checks.senderPoolHealth.status !== 'pass' ? 'deliverability' : undefined,
     });
   }
 
