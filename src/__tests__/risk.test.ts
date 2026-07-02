@@ -1,6 +1,6 @@
-// ─── Risk Management & Deliverability Gates Tests ────────────
-// Validates circuit breakers, strategy risk, pacing, and pool health.
-// Run with: npx tsx src/__tests__/risk.test.ts
+// Load environment variables before initializing db
+import { loadEnvConfig } from '@next/env';
+loadEnvConfig(process.cwd());
 
 import { db as dbClient } from '../lib/db';
 const db = dbClient as any;
