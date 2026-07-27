@@ -90,7 +90,6 @@ ssh-wrapper.py
 git-ssh-v2.py
 git-ssh.sh
 paramiko-ssh.py
-package-lock.json
 prisma/schema.sqlite.prisma
 
 # clerk configuration (can include secrets)
