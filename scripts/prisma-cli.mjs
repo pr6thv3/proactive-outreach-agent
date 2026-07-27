@@ -34,6 +34,18 @@ if (prismaArgs.length === 0) {
   process.exit(1);
 }
 
+if (sqlite) {
+  const pgSchemaPath = path.join(process.cwd(), 'prisma/schema.prisma');
+  const sqliteSchemaPath = path.join(process.cwd(), 'prisma/schema.sqlite.prisma');
+  if (fs.existsSync(pgSchemaPath)) {
+    let content = fs.readFileSync(pgSchemaPath, 'utf8');
+    content = content.replace('provider = "postgresql"', 'provider = "sqlite"');
+    content = content.replace('url      = env("DATABASE_URL")', 'url      = env("SQLITE_DATABASE_URL")');
+    content = content.replace(/\s+embedding\s+Unsupported\("vector"\)\?/g, '');
+    fs.writeFileSync(sqliteSchemaPath, content, 'utf8');
+  }
+}
+
 const schema = sqlite ? 'prisma/schema.sqlite.prisma' : 'prisma/schema.prisma';
 const env = Object.fromEntries(Object.entries({
   ...process.env,

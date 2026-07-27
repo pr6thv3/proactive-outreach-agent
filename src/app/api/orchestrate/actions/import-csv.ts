@@ -16,56 +16,74 @@ export async function importCsvAction(input: z.infer<typeof ImportCsvSchema>, co
   let skipped = parsed.errors.length;
   let dncBlocked = 0;
 
-  for (const leadData of parsed.leads) {
-    const email = leadData.email.trim().toLowerCase();
-    if (await isOnDncList(email, context.organizationId)) {
-      dncBlocked++;
-      skipped++;
-      continue;
-    }
+  // Process leads in chunked batches of 100 to prevent HTTP timeouts & connection pool starvation on large CSVs
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < parsed.leads.length; i += BATCH_SIZE) {
+    const chunk = parsed.leads.slice(i, i + BATCH_SIZE);
+    const chunkEmails = chunk.map(l => l.email.trim().toLowerCase());
 
-    const existing = await db.lead.findFirst({
-      where: { organizationId: context.organizationId, email },
+    // 1. Bulk DNC lookup for chunk
+    const dncEntries = await db.doNotContact.findMany({
+      where: { organizationId: context.organizationId, email: { in: chunkEmails } },
+      select: { email: true },
     });
+    const dncSet = new Set(dncEntries.map(d => d.email.toLowerCase()));
 
-    if (existing) {
-      await db.lead.update({
-        where: { id: existing.id },
+    // 2. Bulk existing lead lookup for chunk
+    const existingLeads = await db.lead.findMany({
+      where: { organizationId: context.organizationId, email: { in: chunkEmails } },
+      select: { id: true, email: true, company: true, title: true, url: true, linkedinUrl: true },
+    });
+    const existingMap = new Map(existingLeads.map(l => [l.email.toLowerCase(), l]));
+
+    for (const leadData of chunk) {
+      const email = leadData.email.trim().toLowerCase();
+      if (dncSet.has(email)) {
+        dncBlocked++;
+        skipped++;
+        continue;
+      }
+
+      const existing = existingMap.get(email);
+      if (existing) {
+        await db.lead.update({
+          where: { id: existing.id },
+          data: {
+            company: existing.company || leadData.company,
+            title: existing.title || leadData.title,
+            url: existing.url || leadData.url,
+            linkedinUrl: existing.linkedinUrl || leadData.linkedinUrl,
+          },
+        });
+        updated++;
+        continue;
+      }
+
+      const lead = await db.lead.create({
         data: {
-          company: existing.company || leadData.company,
-          title: existing.title || leadData.title,
-          url: existing.url || leadData.url,
-          linkedinUrl: existing.linkedinUrl || leadData.linkedinUrl,
+          organizationId: context.organizationId,
+          name: leadData.name.trim(),
+          email,
+          company: leadData.company,
+          title: leadData.title,
+          url: leadData.url,
+          linkedinUrl: leadData.linkedinUrl,
+          source: input.source || 'csv_import',
         },
       });
-      updated++;
-      continue;
+
+      await db.activity.create({
+        data: {
+          organizationId: context.organizationId,
+          leadId: lead.id,
+          type: 'lead_created',
+          description: `Lead imported from ${input.source || 'csv_import'}`,
+          phase: 'system',
+        },
+      });
+
+      created++;
     }
-
-    const lead = await db.lead.create({
-      data: {
-        organizationId: context.organizationId,
-        name: leadData.name.trim(),
-        email,
-        company: leadData.company,
-        title: leadData.title,
-        url: leadData.url,
-        linkedinUrl: leadData.linkedinUrl,
-        source: input.source || 'csv_import',
-      },
-    });
-
-    await db.activity.create({
-      data: {
-        organizationId: context.organizationId,
-        leadId: lead.id,
-        type: 'lead_created',
-        description: `Lead imported from ${input.source || 'csv_import'}`,
-        phase: 'system',
-      },
-    });
-
-    created++;
   }
 
   return { created, updated, skipped, dncBlocked, errors: parsed.errors };

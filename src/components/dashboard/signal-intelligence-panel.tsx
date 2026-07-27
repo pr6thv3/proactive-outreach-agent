@@ -75,7 +75,7 @@ export function SignalIntelligencePanel() {
             <CardTitle className="text-amber-400 text-base">Signal Intelligence Engine — WHY NOW?</CardTitle>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            This is the moat. Every signal is scored for urgency (WHY outreach should happen NOW) with recommended pitch angles and offers.
+            We rank every signal by how urgent it is, and suggest the angle and offer that fits.
           </p>
         </CardHeader>
         <CardContent>

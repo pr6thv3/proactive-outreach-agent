@@ -1,0 +1,37 @@
+name: Hardening CI Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Run Hardening Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma SQLite client
+        run: npm run db:generate:sqlite
+
+      - name: Push SQLite database schema
+        run: npm run db:push:sqlite
+
+      - name: Run Typecheck
+        run: npm run typecheck
+
+      - name: Run Test Hardening Suite
+        run: npm run test:hardening

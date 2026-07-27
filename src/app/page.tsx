@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useDashboardStore } from '@/lib/store';
 import { StatsCards } from '@/components/dashboard/stats-cards';
 import { PipelineView } from '@/components/dashboard/pipeline-view';
@@ -21,10 +21,14 @@ import { JobHealthPanel } from '@/components/dashboard/job-health-panel';
 import { DemoRunPanel } from '@/components/dashboard/demo-run-panel';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
-import { Database, RefreshCw, Loader2, Zap, Brain, Shield, TrendingUp, Cpu, Rocket } from 'lucide-react';
+import { Database, RefreshCw, Loader2, Zap, Brain, Shield, TrendingUp, Cpu, Rocket, ChevronDown, ChevronUp, SlidersHorizontal } from 'lucide-react';
 
 export default function Home() {
   const { stats, activeTab, pipelineRunning, autonomyRunning, setActiveTab, refreshAll, addSampleData, runAutonomousCycle, addToast } = useDashboardStore();
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const advancedTabs = ['deliverability', 'pipeline', 'intelligence', 'autonomy', 'activity', 'jobs', 'demo'];
+  const isAdvancedActive = advancedTabs.includes(activeTab);
 
   useEffect(() => { refreshAll(); }, [refreshAll]);
 
@@ -37,8 +41,8 @@ export default function Home() {
               <svg className="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight">Autonomous Signal-Driven Outbound Platform</h1>
-              <p className="text-[11px] text-slate-400">Signals → Emails → Replies → Meetings → Revenue</p>
+              <h1 className="text-lg font-bold tracking-tight">Alex — Your AI SDR</h1>
+              <p className="text-[11px] text-slate-400">Finding companies, writing outreach, booking meetings</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -66,33 +70,51 @@ export default function Home() {
         <StatsCards stats={stats} />
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <div className="flex items-center justify-between mb-4">
-            <TabsList className="bg-slate-800/50 border border-slate-700 h-9 flex-wrap">
-              <TabsTrigger value="results" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">
-                <TrendingUp className="w-3 h-3 mr-1" />Results
-              </TabsTrigger>
-              <TabsTrigger value="deliverability" className="data-[state=active]:bg-amber-600/20 data-[state=active]:text-amber-400 text-xs px-3">
-                <Shield className="w-3 h-3 mr-1" />Deliverability
-              </TabsTrigger>
-              <TabsTrigger value="pipeline" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Pipeline</TabsTrigger>
-              <TabsTrigger value="intelligence" className="data-[state=active]:bg-amber-600/20 data-[state=active]:text-amber-400 text-xs px-3">
-                <Brain className="w-3 h-3 mr-1" />Intelligence
-              </TabsTrigger>
-              <TabsTrigger value="leads" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Leads</TabsTrigger>
-              <TabsTrigger value="approval" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Approval Queue</TabsTrigger>
-              <TabsTrigger value="messages" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Messages</TabsTrigger>
-              <TabsTrigger value="campaigns" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Campaigns</TabsTrigger>
-              <TabsTrigger value="autonomy" className="data-[state=active]:bg-purple-600/20 data-[state=active]:text-purple-400 text-xs px-3">
-                <Zap className="w-3 h-3 mr-1" />Autonomy
-              </TabsTrigger>
-              <TabsTrigger value="activity" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Activity</TabsTrigger>
-              <TabsTrigger value="jobs" className="data-[state=active]:bg-cyan-600/20 data-[state=active]:text-cyan-400 text-xs px-3">
-                <Cpu className="w-3 h-3 mr-1" />Job Health
-              </TabsTrigger>
-              <TabsTrigger value="demo" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">
-                <Rocket className="w-3 h-3 mr-1" />Demo Run
-              </TabsTrigger>
-            </TabsList>
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <TabsList className="bg-slate-800/50 border border-slate-700 h-9 flex-wrap">
+                <TabsTrigger value="results" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">
+                  <TrendingUp className="w-3 h-3 mr-1" />Results
+                </TabsTrigger>
+                <TabsTrigger value="leads" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Leads</TabsTrigger>
+                <TabsTrigger value="approval" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Review & Send</TabsTrigger>
+                <TabsTrigger value="messages" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Replies</TabsTrigger>
+                <TabsTrigger value="campaigns" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Campaigns</TabsTrigger>
+              </TabsList>
+
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className={`h-9 px-3 text-xs border ${showAdvanced || isAdvancedActive ? 'border-amber-500/40 text-amber-400 bg-amber-500/10' : 'border-slate-800 text-slate-400 hover:text-slate-200'}`}
+              >
+                <SlidersHorizontal className="w-3 h-3 mr-1.5" />
+                Advanced
+                {showAdvanced || isAdvancedActive ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />}
+              </Button>
+
+              {(showAdvanced || isAdvancedActive) && (
+                <TabsList className="bg-slate-900/80 border border-slate-800 h-9 flex-wrap">
+                  <TabsTrigger value="deliverability" className="data-[state=active]:bg-amber-600/20 data-[state=active]:text-amber-400 text-xs px-3">
+                    <Shield className="w-3 h-3 mr-1" />Deliverability
+                  </TabsTrigger>
+                  <TabsTrigger value="pipeline" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Pipeline</TabsTrigger>
+                  <TabsTrigger value="intelligence" className="data-[state=active]:bg-amber-600/20 data-[state=active]:text-amber-400 text-xs px-3">
+                    <Brain className="w-3 h-3 mr-1" />Intelligence
+                  </TabsTrigger>
+                  <TabsTrigger value="autonomy" className="data-[state=active]:bg-purple-600/20 data-[state=active]:text-purple-400 text-xs px-3">
+                    <Zap className="w-3 h-3 mr-1" />Autonomy
+                  </TabsTrigger>
+                  <TabsTrigger value="activity" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">Activity</TabsTrigger>
+                  <TabsTrigger value="jobs" className="data-[state=active]:bg-cyan-600/20 data-[state=active]:text-cyan-400 text-xs px-3">
+                    <Cpu className="w-3 h-3 mr-1" />Job Health
+                  </TabsTrigger>
+                  <TabsTrigger value="demo" className="data-[state=active]:bg-emerald-600/20 data-[state=active]:text-emerald-400 text-xs px-3">
+                    <Rocket className="w-3 h-3 mr-1" />Demo Run
+                  </TabsTrigger>
+                </TabsList>
+              )}
+            </div>
 
             <div className="flex items-center gap-2">
               {pipelineRunning && (

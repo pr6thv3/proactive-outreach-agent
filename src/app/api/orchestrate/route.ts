@@ -263,22 +263,30 @@ async function batchGenerateAction(input: z.infer<typeof BatchGenerateSchema>, c
     if (!campaign) throw new Error('Campaign not found');
   }
 
-  const leads = await db.lead.findMany({
-    where: { id: { in: input.leadIds }, organizationId: context.organizationId },
-    select: { id: true },
-  });
+  const jobs: any[] = [];
+  const BATCH_SIZE = 250;
 
-  if (leads.length !== input.leadIds.length) {
-    throw new Error('One or more leads were not found');
+  for (let i = 0; i < input.leadIds.length; i += BATCH_SIZE) {
+    const chunkIds = input.leadIds.slice(i, i + BATCH_SIZE);
+    const leads = await db.lead.findMany({
+      where: { id: { in: chunkIds }, organizationId: context.organizationId },
+      select: { id: true },
+    });
+
+    if (leads.length !== chunkIds.length) {
+      throw new Error('One or more leads were not found');
+    }
+
+    const chunkJobs = await Promise.all(leads.map(lead => enqueueJob('draft-email', {
+      organizationId: context.organizationId,
+      userId: context.userId,
+      leadId: lead.id,
+      campaignId: input.campaignId,
+      traceId,
+    })));
+
+    jobs.push(...chunkJobs);
   }
-
-  const jobs = await Promise.all(leads.map(lead => enqueueJob('draft-email', {
-    organizationId: context.organizationId,
-    userId: context.userId,
-    leadId: lead.id,
-    campaignId: input.campaignId,
-    traceId,
-  })));
 
   return { jobs };
 }

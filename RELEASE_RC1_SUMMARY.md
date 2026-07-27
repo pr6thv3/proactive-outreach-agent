@@ -16,7 +16,7 @@ This document summarizes the release verification, testing results, configuratio
 
 ### 1. Windows Shell Expansion Resolution
 - **Problem**: When executing `prisma db push` on Windows under a shell (`shell: true`), special characters in the Supabase password (such as `$` and `%`) were interpreted as shell variables, corrupting the connection string and triggering database connection failures.
-- **Fix**: Updated [scripts/prisma-cli.mjs](file:///c:/Users/Preethve/proactive-outreach-agent/scripts/prisma-cli.mjs) to run `prisma` via node (`node node_modules/prisma/build/index.js`) and disabled shell execution (`shell: false`). This completely bypasses shell interpolation.
+- **Fix**: Updated [scripts/prisma-cli.mjs](./scripts/prisma-cli.mjs) to run `prisma` via node (`node node_modules/prisma/build/index.js`) and disabled shell execution (`shell: false`). This completely bypasses shell interpolation. Auto-generation of SQLite schema from PostgreSQL schema was also added.
 
 ### 2. PgVector Database Extension Verification
 - **Problem**: Running `db push` initially failed with `ERROR: type "vector" does not exist` because the Supabase/Neon database did not have the `pgvector` extension enabled.
@@ -30,12 +30,14 @@ This document summarizes the release verification, testing results, configuratio
 
 ## 🧪 Staging Verification & Test Metrics
 
-We executed all verification tests. All suites passed successfully:
+We executed all verification tests. All 474 assertions across the hardening suite passed successfully:
 
 | Test Script | Command | Passed / Total | Status | Summary / Target |
 | :--- | :--- | :--- | :--- | :--- |
 | **Smoke Suite** | `npm run test` | **152 / 152** | ✅ Passed | Core outreach logic, lead scoring, signal decay, bounce classifiers. |
 | **Architecture Gates** | `npm run test` | **62 / 62** | ✅ Passed | Scoping, tenant isolation, Clerk middleware matching, queue models. |
+| **Strategy Engine** | `npm run test` | **13 / 13** | ✅ Passed | Persona matching, cooldowns, strategy entry/exit conditions, selector. |
+| **Risk Gates** | `npm run test` | **25 / 25** | ✅ Passed | Circuit breaker, spam risk, pacing/budgeting, sender pool health. |
 | **Beta Contracts** | `npm run test:beta` | **68 / 68** | ✅ Passed | Citations, evidence snapshot format, readiness checker outcomes. |
 | **Staging Acceptance** | `npm run test:staging` | **83 / 83** | ✅ Passed | 13-step full pipeline simulation (lead import → observe → think → approve → send → webhooks → results). |
 | **Failure-State QA** | `npm run test:failure-qa` | **71 / 71** | ✅ Passed | 12 programmatic failure modes validating UI 5-question responses. |

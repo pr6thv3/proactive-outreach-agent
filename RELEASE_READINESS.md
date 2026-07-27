@@ -10,6 +10,8 @@ This report summarizes the validation, QA, and staging readiness findings for th
 | :--- | :--- | :--- | :--- |
 | **Smoke Tests** | Core Business Logic | ✅ 152 / 152 Pass | Covers CSV parse, DNC, bounce logic, signal decay, personalization hooks, and email classification. |
 | **Architecture Tests** | Safety & Isolation Gates | ✅ 62 / 62 Pass | Verifies Clerk proxy patterns, Zod validator rules, tenant database scoping, queue schemas, and deliverability gates. |
+| **Strategy Engine** | Personalization & Pitching | ✅ 13 / 13 Pass | Persona matching, cooldowns, strategy entry/exit conditions, and scoring selector. |
+| **Risk Management** | Deliverability & Circuit Breakers | ✅ 25 / 25 Pass | Circuit breaker rules, spam risk evaluations, pacing/budgeting, and sender pool health. |
 | **Beta Contracts** | Integration / SQLite | ✅ 68 / 68 Pass | Verifies citations, tokenization, warmup schedule, job health limits, and telemetry traceIds. |
 | **Staging Acceptance** | Full Outreach Loop | ✅ 83 / 83 Pass (Local) | Simulated 13-step flow: Lead import → observe → scoring → AI drafts → approve → send-readiness check → queue job → results update. |
 | **Failure-State QA** | UI Edge Case Resilience | ✅ 71 / 71 Pass (Local) | Tests 12 critical failure modes (Redis down, unverified domain, missing sender, DNC block, bounced hook, etc.) verifying UI answers. |
@@ -54,13 +56,13 @@ RESEND_API_KEY=                  # Resend API key
 RESEND_WEBHOOK_SECRET=           # Svix/Resend webhook signing secret
 NEXT_PUBLIC_BASE_URL=            # HTTPS endpoint of your staging deployment
 ```
-For detailed provisioning steps, see [STAGING_REQUIRED_VARS.md](file:///C:/Users/Preethve/proactive-outreach-agent/STAGING_REQUIRED_VARS.md).
+For detailed provisioning steps, see [STAGING_REQUIRED_VARS.md](./STAGING_REQUIRED_VARS.md).
 
 ---
 
 ## 🚫 Remaining Blockers
 
-1. **Infrastructure Provisioning**: Execution of staging acceptance tests against live infrastructure remains **blocked by missing external credentials** (Postgres, Redis, Clerk, Resend).
+1. **Infrastructure Provisioning**: Staging connections to Supabase PostgreSQL and Upstash Redis are live-verified. External credentials required for production live sending remain: Resend domain DNS verification and production Clerk keys.
 2. **DNS Records**: Verification of SPF, DKIM, and DMARC records on the outreach domain requires DNS access.
 
 ---
@@ -69,10 +71,10 @@ For detailed provisioning steps, see [STAGING_REQUIRED_VARS.md](file:///C:/Users
 
 ### **Recommendation: GO (Staging Ready)**
 
-The release candidate baseline tagged at `beta-0.1-20-lead-loop-rc1` (commit `e75b07b`) is **fully approved and ready for staging deployment**.
+The release candidate baseline tagged at `beta-0.1-20-lead-loop-rc1` (commit `0bc753d`) is **fully approved and ready for staging deployment**.
 - All business logic, safety constraints, telemetry specifications, and UI layouts have been verified through local automation and manual browser QA.
 - The codebase is clean and compliant with the feature freeze requirements.
 - Standard processes have been documented in the simple `Procfile` and updated in `DEPLOYMENT.md`.
 
 ### **Next Step**:
-Deploy the codebase to staging (using the newly created `Procfile`), populate the required environment variables in the hosting provider, run `npx cross-env tsx src/__tests__/staging-acceptance.test.ts` to execute the acceptance tests in staging mode, and begin pilot user onboarding as defined in [PILOT_PROGRAM.md](file:///C:/Users/Preethve/proactive-outreach-agent/PILOT_PROGRAM.md).
+Deploy the codebase to staging (using the newly created `Procfile`), populate the required environment variables in the hosting provider, run `npx cross-env tsx src/__tests__/staging-acceptance.test.ts` to execute the acceptance tests in staging mode, and begin client onboarding as defined in [PILOT_PROGRAM.md](./PILOT_PROGRAM.md).

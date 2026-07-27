@@ -189,6 +189,18 @@ export function DeliverabilityPanel() {
   const deliverability = stats?.deliverability;
   const selectedDomain = domains.find(d => d.id === selectedDomainId) || domains[0] || null;
 
+  const [pollCount, setPollCount] = useState(0);
+
+  // ─── Auto-polling Effect (every 60s for pending domains, max 30 polls) ───
+  useEffect(() => {
+    if (!selectedDomain || selectedDomain.status === 'verified' || pollCount >= 30) return;
+    const timer = setInterval(() => {
+      verifyDomain(selectedDomain.id);
+      setPollCount(c => c + 1);
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [selectedDomain, verifyDomain, pollCount]);
+
   const handleVerify = async (domainId: string) => {
     setVerifying(domainId);
     await verifyDomain(domainId);
@@ -309,10 +321,18 @@ export function DeliverabilityPanel() {
 
   const dnsSection = (
     <div className="space-y-3">
-      <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-        <Shield className="w-4 h-4 text-amber-400" />
-        Domain DNS Setup
-      </h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+          <Shield className="w-4 h-4 text-amber-400" />
+          Domain DNS Setup
+        </h3>
+        {selectedDomain && selectedDomain.status !== 'verified' && (
+          <span className="text-[11px] text-amber-400/80 flex items-center gap-1.5 animate-pulse">
+            <RefreshCw className="w-3 h-3 animate-spin" />
+            Auto-polling Resend status every 60s...
+          </span>
+        )}
+      </div>
 
       {!selectedDomain ? (
         <Card className="p-4 bg-slate-900/50 border-slate-700/50 text-center">
@@ -320,29 +340,55 @@ export function DeliverabilityPanel() {
           <p className="text-xs text-slate-400">Add a domain to see DNS setup instructions</p>
         </Card>
       ) : (
-        <Card className="p-4 bg-slate-900/50 border-slate-700/50">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm text-white font-medium">{selectedDomain.domain}</span>
-            {(needsDns || noVerifiedDomain) && (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-amber-500/20 text-amber-400 border-amber-500/30">
-                <AlertTriangle className="w-3 h-3 mr-1" />DNS Required
+        <Card className="p-4 bg-slate-900/50 border-slate-700/50 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-white font-semibold">{selectedDomain.domain}</span>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Add the following DNS records at your registrar (GoDaddy, Namecheap, Cloudflare, AWS Route 53):
+              </p>
+            </div>
+            {(needsDns || noVerifiedDomain) ? (
+              <Badge variant="outline" className="text-[10px] px-2 py-0.5 bg-amber-500/20 text-amber-400 border-amber-500/30 shrink-0">
+                <AlertTriangle className="w-3 h-3 mr-1" />DNS Verification Pending
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-[10px] px-2 py-0.5 bg-emerald-500/20 text-emerald-400 border-emerald-500/30 shrink-0">
+                <CheckCircle className="w-3 h-3 mr-1" />Domain Verified & Ready
               </Badge>
             )}
           </div>
 
           <div className="space-y-3">
             {dnsRecords.map((rec, i) => (
-              <div key={i} className="rounded border border-slate-700/50 bg-slate-800/50 p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-slate-700/50 text-slate-300 border-slate-600">
-                    {rec.type}
+              <div key={i} className="rounded-lg border border-slate-700/60 bg-slate-800/40 p-3.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-[10px] px-2 py-0.5 font-semibold bg-slate-700 text-slate-200 border-slate-600">
+                      {rec.type}
+                    </Badge>
+                    <span className="text-xs text-slate-400">Host:</span>
+                    <code className="text-xs text-emerald-400 font-mono font-medium">{rec.host}</code>
+                    <CopyButton text={rec.host} />
+                  </div>
+                  <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
+                    i === 0 ? (selectedDomain.spfVerified ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30') :
+                    i === 1 ? (selectedDomain.dkimVerified ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30') :
+                    (selectedDomain.dmarcVerified ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30')
+                  }`}>
+                    {(i === 0 ? selectedDomain.spfVerified : i === 1 ? selectedDomain.dkimVerified : selectedDomain.dmarcVerified) ? 'Verified' : 'Pending'}
                   </Badge>
-                  <span className="text-xs text-slate-400">Host:</span>
-                  <code className="text-xs text-emerald-400 font-mono">{rec.host}</code>
                 </div>
-                <div className="flex items-center gap-2">
+
+                <p className="text-[11px] text-slate-400 font-normal">
+                  {i === 0 && 'Authorizes Alex to send outreach emails on behalf of your company domain.'}
+                  {i === 1 && 'Attaches a tamper-proof digital signature verifying your emails are authentic.'}
+                  {i === 2 && 'Protects your company domain against email spoofing and phishing attempts.'}
+                </p>
+
+                <div className="flex items-center gap-2 pt-1 border-t border-slate-700/30">
                   <span className="text-xs text-slate-400 shrink-0">Value:</span>
-                  <div className="flex-1 bg-slate-900 rounded px-2 py-1.5 overflow-x-auto">
+                  <div className="flex-1 bg-slate-950/80 rounded px-2.5 py-1.5 overflow-x-auto border border-slate-800">
                     <code className="text-[11px] text-amber-300 font-mono break-all">{rec.value}</code>
                   </div>
                   <CopyButton text={rec.value} />
@@ -351,24 +397,31 @@ export function DeliverabilityPanel() {
             ))}
           </div>
 
-          <div className="flex items-center gap-2 mt-4">
-            <Button
-              size="sm"
-              onClick={() => handleVerify(selectedDomain.id)}
-              disabled={verifying === selectedDomain.id}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white h-8 text-xs"
-            >
-              {verifying === selectedDomain.id ? (
-                <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
-              ) : (
-                <RefreshCw className="w-3.5 h-3.5 mr-1" />
+          <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+            <div className="flex items-center gap-3">
+              <Button
+                size="sm"
+                onClick={() => handleVerify(selectedDomain.id)}
+                disabled={verifying === selectedDomain.id}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white h-8 text-xs px-4"
+              >
+                {verifying === selectedDomain.id ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                )}
+                Verify DNS Now
+              </Button>
+              {selectedDomain.status === 'verified' && (
+                <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
+                  <CheckCircle className="w-4 h-4" />Domain verified — Ready to start campaign!
+                </span>
               )}
-              Verify DNS
-            </Button>
-            {selectedDomain.status === 'verified' && (
-              <span className="text-xs text-emerald-400 flex items-center gap-1">
-                <CheckCircle className="w-3.5 h-3.5" />Domain verified
-              </span>
+            </div>
+            {selectedDomain.status !== 'verified' && (
+              <p className="text-[11px] text-slate-400 hidden sm:block">
+                DNS propagation usually takes 1-5 minutes (up to 24h at some registrars).
+              </p>
             )}
           </div>
         </Card>

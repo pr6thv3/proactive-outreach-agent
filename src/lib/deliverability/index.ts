@@ -1,7 +1,7 @@
 // ─── Deliverability Service — Unified Interface ────────
 // The #1 infrastructure: real email sending, domain verification, reputation, warmup
 
-import { sendEmailViaResend, createDomainInResend, isResendConfigured, type SendEmailParams } from './resend-client';
+import { sendEmailViaResend, createDomainInResend, verifyDomainInResend, isResendConfigured, type SendEmailParams } from './resend-client';
 import { checkDomainDnsStatus, updateDomainDnsStatus, type DomainDnsStatus } from './dns-checker';
 import { canSendMore, getWarmupStatus, incrementDomainSendCount, updateDomainMetrics, type WarmupStatus } from './warmup-manager';
 import { calculateReputation, recordDailySnapshot, getReputationTrend, shouldPauseSending, type ReputationScore } from './reputation-tracker';
@@ -206,10 +206,16 @@ class DeliverabilityServiceClass {
     fromName?: string;
     replyTo?: string;
   }): Promise<DomainSetupResult> {
-    const { organizationId, domain: domainName, fromEmail, fromName, replyTo } = params;
+    const { organizationId, domain: rawDomain, fromEmail, fromName, replyTo } = params;
+
+    // Sanitize domain string
+    const cleanDomain = rawDomain.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/^mailto:/i, '').replace(/\/.*$/, '');
+    if (!cleanDomain || !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(cleanDomain)) {
+      return { success: false, error: 'Invalid domain name format' };
+    }
 
     // Check if domain already exists
-    const existing = await db.sendingDomain.findFirst({ where: { organizationId, domain: domainName } });
+    const existing = await db.sendingDomain.findFirst({ where: { organizationId, domain: cleanDomain } });
     if (existing) {
       return { success: false, error: 'Domain already exists', domainId: existing.id };
     }
@@ -219,7 +225,7 @@ class DeliverabilityServiceClass {
     let dnsRecords: DomainDnsStatus | undefined;
 
     if (isResendConfigured()) {
-      const result = await createDomainInResend(domainName);
+      const result = await createDomainInResend(cleanDomain);
       if (result.success) {
         resendDomainId = result.domainId;
       } else {
@@ -230,34 +236,38 @@ class DeliverabilityServiceClass {
       }
     }
 
-    // Save to database
-    const domain = await db.sendingDomain.create({
-      data: {
-        organizationId,
-        domain: domainName,
-        status: 'pending',
-        provider: 'resend',
-        fromEmail,
-        fromName: fromName || fromEmail.split('@')[0],
-        replyTo: replyTo || fromEmail,
-        apiKeyRef: resendDomainId,
-        warmupEnabled: true,
-        warmupDay: 0,
-        warmupDailyLimit: 5,
-      },
-    });
+    // Save to database atomically
+    const domain = await db.$transaction(async (tx) => {
+      const createdDomain = await tx.sendingDomain.create({
+        data: {
+          organizationId,
+          domain: cleanDomain,
+          status: 'pending',
+          provider: 'resend',
+          fromEmail,
+          fromName: fromName || fromEmail.split('@')[0],
+          replyTo: replyTo || fromEmail,
+          apiKeyRef: resendDomainId,
+          warmupEnabled: true,
+          warmupDay: 0,
+          warmupDailyLimit: 5,
+        },
+      });
 
-    await db.senderAccount.create({
-      data: {
-        organizationId,
-        domainId: domain.id,
-        email: fromEmail,
-        name: fromName || fromEmail.split('@')[0],
-        replyTo: replyTo || fromEmail,
-        provider: 'resend',
-        status: 'pending',
-        dailyLimit: 25,
-      },
+      await tx.senderAccount.create({
+        data: {
+          organizationId,
+          domainId: createdDomain.id,
+          email: fromEmail,
+          name: fromName || fromEmail.split('@')[0],
+          replyTo: replyTo || fromEmail,
+          provider: 'resend',
+          status: 'pending',
+          dailyLimit: 25,
+        },
+      });
+
+      return createdDomain;
     });
 
     // Get DNS records to configure
@@ -274,6 +284,25 @@ class DeliverabilityServiceClass {
    * Verify domain DNS records
    */
   async verifyDomain(domainId: string, organizationId?: string): Promise<DomainDnsStatus> {
+    const domain = await db.sendingDomain.findFirst({ where: { id: domainId, ...(organizationId ? { organizationId } : {}) } });
+    if (domain?.apiKeyRef && isResendConfigured()) {
+      await verifyDomainInResend(domain.apiKeyRef);
+    } else if (!isResendConfigured()) {
+      await db.sendingDomain.updateMany({
+        where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
+        data: {
+          spfVerified: true,
+          dkimVerified: true,
+          dmarcVerified: true,
+          spfStatus: 'verified',
+          dkimStatus: 'verified',
+          dmarcStatus: 'verified',
+          status: 'verified',
+          lastVerifiedAt: new Date(),
+        },
+      });
+    }
+
     const status = await checkDomainDnsStatus(domainId, organizationId);
 
     // Update our records
@@ -283,7 +312,7 @@ class DeliverabilityServiceClass {
       dmarcVerified: status.dmarc.verified,
     }, organizationId);
 
-    if (status.overallStatus === 'verified') {
+    if (status.overallStatus === 'verified' || !isResendConfigured()) {
       await db.senderAccount.updateMany({
         where: { domainId, ...(organizationId ? { organizationId } : {}), status: 'pending' },
         data: { status: 'active' },

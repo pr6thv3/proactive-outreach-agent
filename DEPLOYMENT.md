@@ -15,7 +15,7 @@ This guide details the steps required to deploy the Proactive Outreach Agent to 
 
 ## 🔑 2. Required Environment Variables
 
-Ensure the following variables are configured in your hosting platform. For detailed instructions on how to obtain these keys, see [STAGING_REQUIRED_VARS.md](file:///C:/Users/Preethve/proactive-outreach-agent/STAGING_REQUIRED_VARS.md):
+Ensure the following variables are configured in your hosting platform. For detailed instructions on how to obtain these keys, see [STAGING_REQUIRED_VARS.md](./STAGING_REQUIRED_VARS.md):
 
 ```bash
 DATABASE_URL=

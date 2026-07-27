@@ -398,7 +398,8 @@ async function runTests() {
     section('5. evaluateSendReadiness Pipeline Integration');
     db.campaign.findFirst = async () => mockCampaign();
     db.sendingDomain.findFirst = async () => mockDomain();
-    db.senderAccount.findFirst = async () => mockSender();
+    db.senderAccount.findFirst = async () => ({ ...mockSender(), domain: mockDomain() } as any);
+    db.senderAccount.findMany = async () => [{ ...mockSender(), domain: mockDomain() } as any];
     db.campaignSenderPool.findMany = async () => [];
     db.outreachMessage.findFirst = async () => mockMessage({ lead: mockLead() } as any);
     db.emailEvent.count = async () => 0;

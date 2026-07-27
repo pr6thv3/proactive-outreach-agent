@@ -12,13 +12,15 @@ import { Megaphone, Plus, Settings, Play } from 'lucide-react';
 import { useState } from 'react';
 
 export function CampaignPanel() {
-  const { campaigns, createCampaign } = useDashboardStore();
+  const { campaigns, domains, createCampaign } = useDashboardStore();
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({
     name: '', goal: '', targetAudience: '', offer: '', senderName: 'Alex Chen', senderEmail: 'alex@outreachai.com',
     tone: 'professional', cta: 'Book a 15-min discovery call', maxDailySends: 50, followUpSchedule: [3, 7, 14],
     productDescription: '',
   });
+
+  const hasVerifiedDomain = domains.length > 0 && domains.some(d => d.status === 'verified');
 
   const handleCreate = async () => {
     if (!form.name) return;
@@ -30,7 +32,14 @@ export function CampaignPanel() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-white">Campaigns</h3>
+        <div>
+          <h3 className="text-sm font-medium text-white">Campaigns</h3>
+          {!hasVerifiedDomain && (
+            <p className="text-[11px] text-amber-400/90 mt-0.5">
+              ⚠️ Sending domain verification required to start campaign sending.
+            </p>
+          )}
+        </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
             <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white h-8 text-xs"><Plus className="w-3.5 h-3.5 mr-1" />New Campaign</Button>
@@ -67,13 +76,27 @@ export function CampaignPanel() {
           <p className="text-sm text-slate-500">No campaigns yet</p>
         </Card>
       ) : campaigns.map(c => (
-        <Card key={c.id} className="bg-slate-900/50 border-slate-700/50 p-4">
-          <div className="flex items-start justify-between mb-2">
+        <Card key={c.id} className="bg-slate-900/50 border-slate-700/50 p-4 space-y-3">
+          <div className="flex items-start justify-between">
             <div>
               <h4 className="text-sm font-medium text-white">{c.name}</h4>
               <p className="text-[10px] text-slate-400 mt-0.5">{c.goal || 'No goal set'}</p>
             </div>
-            <Badge variant="outline" className={`text-[9px] h-4 ${c.status === 'running' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-slate-500/15 text-slate-400 border-slate-500/30'}`}>{c.status}</Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className={`text-[9px] h-4 ${c.status === 'running' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-slate-500/15 text-slate-400 border-slate-500/30'}`}>{c.status}</Badge>
+              <Button
+                size="sm"
+                disabled={!hasVerifiedDomain}
+                className={`h-7 text-[11px] px-3 ${
+                  hasVerifiedDomain
+                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+                }`}
+              >
+                <Play className="w-3 h-3 mr-1" />
+                {hasVerifiedDomain ? 'Start Campaign' : 'Domain Verification Required'}
+              </Button>
+            </div>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
             <div><span className="text-slate-500">Target:</span> <span className="text-slate-300">{c.targetAudience || '—'}</span></div>

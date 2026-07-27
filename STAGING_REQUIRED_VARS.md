@@ -3,8 +3,8 @@
 Staging validation requires connecting to real external services and infrastructure. If you do not have staging credentials, this guide documents the necessary environment variables and how to provision them.
 
 > [!WARNING]
-> **Current Status**: Staging execution is **blocked by missing external credentials**.
-> Local validation using SQLite, dev auth bypass (`AUTH_DEV_BYPASS=true`), and automated test suites (`test:staging`, `test:failure-qa`) have been fully verified and pass locally. However, deployment and verification against live staging resources cannot proceed until the variables below are provided in `.env.local`.
+> **Current Status**: Infrastructure DB & Redis connections are live-verified against Supabase & Upstash. Active blockers for live outbound sending are: Resend domain DNS verification (SPF/DKIM/DMARC) and production Clerk authentication keys.
+> Local validation using SQLite, dev auth bypass (`AUTH_DEV_BYPASS=true`), and automated test suites (`test:hardening`) have been fully verified (474 assertions passing).
 
 ---
 
