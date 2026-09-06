@@ -1,34 +1,44 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
-import { isClerkConfigured } from '@/lib/auth/env';
+import type { NextRequest } from 'next/server';
+import { getToken } from 'next-auth/jwt';
 
-const isWebhookRoute = createRouteMatcher(['/api/webhooks(.*)']);
-const isProtectedRoute = createRouteMatcher([
-  '/',
-  '/api(.*)',
-]);
+export default async function proxy(request: NextRequest) {
+  const secret = process.env.NEXTAUTH_SECRET || 'fallback-secret-for-development-32-chars-min';
+  const token = await getToken({ req: request, secret });
+  const { pathname } = request.nextUrl;
 
-export default clerkMiddleware(async (auth, request) => {
-  if (isWebhookRoute(request)) return NextResponse.next();
-
-  if (!isClerkConfigured()) {
-    if (process.env.NODE_ENV === 'production') {
-      return NextResponse.json({ error: 'Clerk is not configured' }, { status: 500 });
-    }
-
+  // Public paths
+  if (
+    pathname.startsWith('/auth') ||
+    pathname.startsWith('/api/auth') ||
+    pathname.startsWith('/api/webhooks') ||
+    pathname.startsWith('/api/inngest') ||
+    pathname === '/'
+  ) {
     return NextResponse.next();
   }
 
-  if (isProtectedRoute(request)) {
-    await auth.protect();
+  // Local development bypass
+  if (process.env.AUTH_DEV_BYPASS === 'true') {
+    return NextResponse.next();
+  }
+
+  // Unauthenticated user
+  if (!token) {
+    const signInUrl = new URL('/auth/signin', request.url);
+    signInUrl.searchParams.set('callbackUrl', pathname);
+    return NextResponse.redirect(signInUrl);
+  }
+
+  // Incomplete onboarding redirect to wizard
+  const onboardingComplete = (token as any).onboardingComplete;
+  if (!onboardingComplete && !pathname.startsWith('/onboarding') && !pathname.startsWith('/api')) {
+    return NextResponse.redirect(new URL('/onboarding/wizard', request.url));
   }
 
   return NextResponse.next();
-});
+}
 
 export const config = {
-  matcher: [
-    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
-    '/(api|trpc)(.*)',
-  ],
+  matcher: ['/dashboard/:path*', '/onboarding/:path*', '/admin/:path*'],
 };

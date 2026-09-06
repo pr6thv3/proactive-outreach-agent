@@ -199,12 +199,12 @@ export async function checkCircuitBreaker(params: {
   // 4. Handle auto-pausing/suspending as specified in deliverability gates
   try {
     if (triggered) {
-      if ((bounceExceeded || unsubscribeExceeded) && campaignId && campaign && campaign.status !== 'paused') {
+      if ((bounceExceeded || unsubscribeExceeded || complaintExceeded) && campaignId && campaign && campaign.status !== 'paused') {
         await db.campaign.update({
           where: { id: campaignId },
           data: {
             status: 'paused',
-            pausedReason: `Circuit breaker triggered: ${reason}`,
+            pausedReason: reason?.startsWith('Circuit breaker triggered:') ? reason : `Circuit breaker triggered: ${reason}`,
           },
         });
       }

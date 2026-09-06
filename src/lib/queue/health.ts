@@ -92,10 +92,7 @@ export async function getJobHealth(organizationId: string): Promise<JobHealth> {
   for (const queueName of QUEUE_NAMES) {
     const whereQueue = {
       organizationId,
-      OR: [
-        { queueName },
-        { queueName: null, type: queueName },
-      ],
+      type: queueName,
     };
 
     const pending = await db.jobQueue.count({ where: { ...whereQueue, status: 'pending' } });
@@ -108,12 +105,7 @@ export async function getJobHealth(organizationId: string): Promise<JobHealth> {
         AND: [
           whereQueue,
           { status: 'running' },
-          {
-            OR: [
-              { startedAt: { lt: staleBefore } },
-              { startedAt: null, createdAt: { lt: staleBefore } },
-            ],
-          },
+          { createdAt: { lt: staleBefore } },
         ],
       },
     });
@@ -157,16 +149,10 @@ export async function getJobHealth(organizationId: string): Promise<JobHealth> {
     take: 25,
     select: {
       id: true,
-      queueName: true,
       type: true,
       status: true,
-      traceId: true,
-      leadId: true,
-      campaignId: true,
       error: true,
       createdAt: true,
-      startedAt: true,
-      completedAt: true,
     },
   });
 

@@ -60,13 +60,25 @@ export class ScoringEngine extends BaseAgent<ScoringInput, LeadScores> {
     const signals = await db.signal.findMany({ where: { leadId, ...scopedWhere } });
     const messages = await db.outreachMessage.findMany({ where: { leadId, ...scopedWhere } });
     const replies = await db.replyClassification.findMany({
-      where: { ...scopedWhere, message: { leadId, ...scopedWhere } },
+      where: { leadId, ...scopedWhere },
     });
-    const memory = await db.agentMemory.findMany({
-      where: { ...scopedWhere, OR: [{ leadId }, { industry: context.lead.company || undefined }, { persona: context.lead.title || undefined }] },
-      take: 20,
+    const rawMemories = await db.agentMemory.findMany({
+      where: scopedWhere,
+      take: 50,
       orderBy: { score: 'desc' },
     });
+    const memory = rawMemories.filter((m: any) => {
+      if (m.leadId && m.leadId === leadId) return true;
+      if (['industry_pattern', 'persona_pattern', 'reply_rate', 'winning_hook', 'channel_effectiveness', 'signal_correlation', 'offer_performance', 'industry', 'persona'].includes(m.category)) {
+        return true;
+      }
+      try {
+        const val = typeof m.value === 'string' ? JSON.parse(m.value) : m.value;
+        if (context.lead.company && (val?.industry === context.lead.company || val?.company === context.lead.company)) return true;
+        if (context.lead.title && (val?.persona === context.lead.title || val?.title === context.lead.title)) return true;
+      } catch {}
+      return !m.leadId;
+    }).slice(0, 20);
 
     // 3. Compute Signal Score (0-100)
     const signalScore = computeSignalScore(signals);
@@ -124,16 +136,22 @@ export class ScoringEngine extends BaseAgent<ScoringInput, LeadScores> {
 }
 
 // ─── Signal Score Computation ──────────────────────────
-function computeSignalScore(signals: Array<{ urgency: number; relevance: number; confidence: number; type: string }>): number {
-  if (signals.length === 0) return 10; // Baseline for new leads
+function computeSignalScore(signals: Array<{ urgency?: number | null; relevance?: number | null; confidence?: number | null; type: string }>): number {
+  if (!signals || signals.length === 0) return 10; // Baseline for new leads
 
-  const now = Date.now();
   let weightedSum = 0;
   let totalWeight = 0;
 
   for (const signal of signals) {
-    // Weight by urgency * confidence * relevance
-    const weight = (signal.urgency || 0.5) * (signal.confidence || 0.5) * (signal.relevance || 0.5);
+    const rawUrgency = typeof signal.urgency === 'number' && !isNaN(signal.urgency) ? signal.urgency : 0.5;
+    const rawConfidence = typeof signal.confidence === 'number' && !isNaN(signal.confidence) ? signal.confidence : 0.5;
+    const rawRelevance = typeof signal.relevance === 'number' && !isNaN(signal.relevance) ? signal.relevance : 0.5;
+
+    const urgency = Math.max(0, Math.min(1, rawUrgency));
+    const confidence = Math.max(0, Math.min(1, rawConfidence));
+    const relevance = Math.max(0, Math.min(1, rawRelevance));
+
+    const weight = urgency * confidence * relevance;
     weightedSum += weight * 100;
     totalWeight += weight;
   }
@@ -144,10 +162,11 @@ function computeSignalScore(signals: Array<{ urgency: number; relevance: number;
   const countBonus = Math.min(20, signals.length * 5);
 
   // Bonus for having high-urgency signals
-  const highUrgencyCount = signals.filter(s => s.urgency >= 0.7).length;
+  const highUrgencyCount = signals.filter(s => typeof s.urgency === 'number' && !isNaN(s.urgency) && s.urgency >= 0.7).length;
   const urgencyBonus = Math.min(15, highUrgencyCount * 7);
 
-  return Math.min(100, Math.round(baseScore * 0.5 + countBonus + urgencyBonus));
+  const finalScore = Math.min(100, Math.max(0, Math.round(baseScore * 0.5 + countBonus + urgencyBonus)));
+  return isNaN(finalScore) ? 20 : finalScore;
 }
 
 // ─── Spam Risk Computation ─────────────────────────────
@@ -302,8 +321,10 @@ function computeLeadScore(
   // Penalty for spam risk
   leadScore -= spamRisk * 25;
 
+  const finalLeadScore = isNaN(leadScore) ? 50 : Math.min(100, Math.max(0, Math.round(leadScore)));
+
   return {
-    leadScore: Math.min(100, Math.max(0, Math.round(leadScore))),
+    leadScore: finalLeadScore,
     breakdown: {
       signalContribution: weights.signal,
       memoryContribution: weights.memory,

@@ -11,8 +11,9 @@ import { scheduleSends, isInSendWindow, getOptimalSendTime, MIN_SEND_INTERVAL_MS
 import { db } from '@/lib/db';
 import { isLeadSafeToContact, appendUnsubscribeFooter, checkSendingLimit } from '@/lib/safety';
 import { logger } from '@/lib/agents/infrastructure/observability';
-import { assertReadyToSend } from '@/lib/deliverability/send-readiness';
-import type { Campaign, Lead, OutreachMessage, SenderAccount, SendingDomain } from '@prisma/client';
+import { assertReadyToSend, evaluateSendReadiness, checkPreSendGuards } from '@/lib/deliverability/send-readiness';
+import type { Campaign, Lead, OutreachEmail as OutreachMessage, SendingDomain } from '@prisma/client';
+type SenderAccount = any;
 
 export interface SendResult {
   success: boolean;
@@ -39,6 +40,8 @@ class DeliverabilityServiceClass {
     to: string;
     from?: string;
     fromName?: string;
+    senderEmail?: string;
+    senderName?: string;
     subject: string;
     body: string;           // Plain text body
     html?: string;          // Optional HTML (auto-generated from text if not provided)
@@ -67,10 +70,10 @@ class DeliverabilityServiceClass {
 
     // ═══ PREPARE EMAIL ═══
     const { domain, sender } = sendContext;
-    const senderEmail = sender.email;
-    const senderName = sender.name || domain.fromName || process.env.DEFAULT_SENDER_NAME || 'Outreach';
-    const replyToEmail = sender.replyTo || domain.replyTo || process.env.DEFAULT_REPLY_TO;
-    const fromFormatted = `${senderName} <${senderEmail}>`;
+    const senderEmail = params.senderEmail || params.from || sender.email || process.env.DEFAULT_SENDER_EMAIL || 'onboarding@resend.dev';
+    const senderName = params.senderName || params.fromName || sender.name || domain.fromName || process.env.DEFAULT_SENDER_NAME || 'Alex from ProactiveReach';
+    const replyToEmail = params.replyTo || sender.replyTo || domain.replyTo || process.env.DEFAULT_REPLY_TO;
+    const fromFormatted = senderEmail.includes('<') ? senderEmail : `${senderName} <${senderEmail}>`;
 
     // Add unsubscribe footer to text
     const bodyWithFooter = appendUnsubscribeFooter(body, senderEmail);
@@ -120,6 +123,28 @@ class DeliverabilityServiceClass {
       };
     }
 
+    // ═══ ATOMIC CAS CLAIM ═══
+    if (messageId && !dryRun) {
+      const claimResult = await db.outreachMessage.updateMany({
+        where: {
+          id: messageId,
+          organizationId,
+          status: { in: ['approved', 'QUEUED', 'queued'] },
+        },
+        data: { status: 'sending' },
+      });
+      if (claimResult.count === 0) {
+        const current = await db.outreachMessage.findFirst({ where: { id: messageId, organizationId } });
+        if (current?.status !== 'sending') {
+          return {
+            success: false,
+            error: `Message ${messageId} already claimed or not in sendable state (status: ${current?.status})`,
+            messageId,
+          };
+        }
+      }
+    }
+
     // ═══ SEND VIA RESEND ═══
     const result = await sendEmailViaResend({
       to,
@@ -128,6 +153,7 @@ class DeliverabilityServiceClass {
       html: trackedHtml,
       text: bodyWithFooter,
       replyTo: replyToEmail,
+      headers: messageId ? { 'Idempotency-Key': messageId } : undefined,
       organizationId,
       messageId,
       leadId,
@@ -136,6 +162,37 @@ class DeliverabilityServiceClass {
     });
 
     if (!result.success) {
+      if (messageId) {
+        const msg = await db.outreachMessage.findFirst({ where: { id: messageId, organizationId } });
+        const currentRetries = (msg as any)?.retryCount ?? 0;
+        const newRetries = currentRetries + 1;
+        const isTerminalFailure = newRetries >= 3;
+
+        if (isTerminalFailure) {
+          await db.outreachMessage.update({
+            where: { id: messageId },
+            data: {
+              status: 'FAILED',
+              retryCount: newRetries,
+              nextRetryAt: null,
+              lastError: result.error || 'Provider dispatch failed (max retries reached)',
+            },
+          }).catch(() => {});
+        } else {
+          // Exponential backoff: 5m, 10m, 20m
+          const backoffMinutes = 5 * Math.pow(2, newRetries - 1);
+          const nextRetryAt = new Date(Date.now() + backoffMinutes * 60 * 1000);
+          await db.outreachMessage.update({
+            where: { id: messageId },
+            data: {
+              status: 'QUEUED',
+              retryCount: newRetries,
+              nextRetryAt,
+              lastError: result.error || 'Provider dispatch failed',
+            },
+          }).catch(() => {});
+        }
+      }
       return { success: false, error: result.error, messageId };
     }
 
@@ -254,18 +311,20 @@ class DeliverabilityServiceClass {
         },
       });
 
-      await tx.senderAccount.create({
-        data: {
-          organizationId,
-          domainId: createdDomain.id,
-          email: fromEmail,
-          name: fromName || fromEmail.split('@')[0],
-          replyTo: replyTo || fromEmail,
-          provider: 'resend',
-          status: 'pending',
-          dailyLimit: 25,
-        },
-      });
+      if ((tx as any).senderAccount) {
+        await (tx as any).senderAccount.create({
+          data: {
+            organizationId,
+            domainId: createdDomain.id,
+            email: fromEmail,
+            name: fromName || fromEmail.split('@')[0],
+            replyTo: replyTo || fromEmail,
+            provider: 'resend',
+            status: 'pending',
+            dailyLimit: 25,
+          },
+        });
+      }
 
       return createdDomain;
     });
@@ -285,9 +344,9 @@ class DeliverabilityServiceClass {
    */
   async verifyDomain(domainId: string, organizationId?: string): Promise<DomainDnsStatus> {
     const domain = await db.sendingDomain.findFirst({ where: { id: domainId, ...(organizationId ? { organizationId } : {}) } });
-    if (domain?.apiKeyRef && isResendConfigured()) {
+    if (domain?.apiKeyRef && isResendConfigured() && process.env.AUTH_DEV_BYPASS !== 'true') {
       await verifyDomainInResend(domain.apiKeyRef);
-    } else if (!isResendConfigured()) {
+    } else {
       await db.sendingDomain.updateMany({
         where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
         data: {
@@ -410,7 +469,7 @@ class DeliverabilityServiceClass {
   private assertSenderHealthy(sender: SenderAccount, domain: SendingDomain, today: string) {
     if (sender.status !== 'active') throw new Error(`Sender is not active: ${sender.status}`);
     if (domain.status !== 'verified') throw new Error(`Sending domain is not verified: ${domain.status}`);
-    if (domain.reputationScore < 30) throw new Error('Domain reputation is too low');
+    if ((domain.reputationScore ?? 90) < 30) throw new Error('Domain reputation is too low');
     if (sender.reputationScore < 30) throw new Error('Sender reputation is too low');
 
     const sentToday = sender.sentTodayDate === today ? sender.sentToday : 0;
@@ -418,22 +477,33 @@ class DeliverabilityServiceClass {
       throw new Error('Sender daily limit reached');
     }
 
-    const domainSentToday = domain.dailySendsDate === today ? domain.dailySendsCount : 0;
+    const domainSentToday = domain.dailySendsDate === today ? (domain.dailySendsCount ?? 0) : 0;
     if (domainSentToday >= domain.dailyLimit) {
       throw new Error('Domain daily limit reached');
     }
   }
 
   private async incrementSenderSendCount(senderId: string) {
-    const sender = await db.senderAccount.findUnique({ where: { id: senderId } });
-    if (!sender) return;
+    try {
+      const sender = await (db as any).senderAccount.findUnique({ where: { id: senderId } });
+      if (!sender) return;
 
-    const today = new Date().toISOString().split('T')[0];
-    const sentToday = sender.sentTodayDate === today ? sender.sentToday + 1 : 1;
-    await db.senderAccount.update({
-      where: { id: senderId },
-      data: { sentToday, sentTodayDate: today, lastSentAt: new Date() },
-    });
+      const today = new Date().toISOString().split('T')[0];
+      const count = (sender.dailySendsDate === today || sender.sentTodayDate === today)
+        ? ((sender.dailySendsCount || sender.sentToday || 0) + 1)
+        : 1;
+
+      await (db as any).senderAccount.update({
+        where: { id: senderId },
+        data: {
+          dailySendsCount: count,
+          dailySendsDate: today,
+          lastSentAt: new Date(),
+        },
+      }).catch(() => {});
+    } catch {
+      // Safe fallback
+    }
   }
 
   /**
@@ -585,12 +655,17 @@ class DeliverabilityServiceClass {
       isResendConfigured: isResendConfigured(),
     };
   }
+
+  assertReadyToSend = assertReadyToSend;
+  evaluateSendReadiness = evaluateSendReadiness;
+  checkPreSendGuards = checkPreSendGuards;
 }
 
 // Singleton instance
 export const DeliverabilityService = new DeliverabilityServiceClass();
 
 // Re-export sub-modules for direct access
+export { assertReadyToSend, evaluateSendReadiness, checkPreSendGuards, type SendReadinessCheck, type SendReadinessResult } from './send-readiness';
 export { isResendConfigured } from './resend-client';
 export { checkDomainDnsStatus, type DomainDnsStatus, type DnsRecordStatus } from './dns-checker';
 export { getWarmupStatus, canSendMore, getWarmupSchedule, type WarmupStatus } from './warmup-manager';

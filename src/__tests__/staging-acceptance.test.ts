@@ -111,9 +111,7 @@ async function runAcceptanceTests() {
     org = await db.organization.create({
       data: {
         workspaceKey: 'staging_acceptance',
-        clerkOrgId: 'org_staging_acceptance',
         name: 'Staging Acceptance Org',
-        ownerUserId: 'staging_user',
       },
     });
   }
@@ -545,8 +543,9 @@ async function runAcceptanceTests() {
   // The stats API uses auth context — under dev bypass it hits dev_workspace.
   // We verify the API route is functional and returns the expected shape.
   const statsRes = await getStats();
-  assertEqual(statsRes.status, 200, 'Stats API returns 200');
   const statsData = await statsRes.json();
+  if (statsRes.status !== 200) console.log("STATS ERROR DATA:", JSON.stringify(statsData, null, 2));
+  assertEqual(statsRes.status, 200, 'Stats API returns 200');
   assert(!!statsData.data, 'Stats data exists');
 
   // Verify results loop shape

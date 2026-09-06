@@ -102,9 +102,7 @@ async function setupBaselineData() {
     org = await db.organization.create({
       data: {
         workspaceKey: 'failure_qa',
-        clerkOrgId: 'org_failure_qa',
         name: 'Failure QA Org',
-        ownerUserId: 'qa_user',
       },
     });
   }

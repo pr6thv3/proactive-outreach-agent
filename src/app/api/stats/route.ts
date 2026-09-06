@@ -1,16 +1,14 @@
-// ─── API: Stats ───────────────────────────────────────
-// Production dashboard statistics with scoring, signal intelligence, memory, and queue stats
-
+import { NextRequest } from 'next/server';
 import { db } from '@/lib/db';
 import { getPipelineMetrics } from '@/lib/agents/infrastructure/observability';
 import { requireWorkspace } from '@/lib/auth/context';
 import { createTraceId, handleApiError, ok } from '@/lib/api/responses';
 import { getCitationQuality } from '@/lib/agents/think/evidence';
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const organizationId = context.organizationId;
 
     const totalLeads = await db.lead.count({ where: { organizationId, isBlacklisted: false } });
@@ -94,12 +92,38 @@ export async function GET() {
 
     const campaigns = await db.campaign.findMany({
       where: { organizationId },
-      include: { _count: { select: { messages: true } } },
+      include: { _count: { select: { outreachEmails: true } } },
       orderBy: { createdAt: 'desc' },
     });
 
     const deliverability = await getDeliverabilityStats(organizationId);
-    const resultsLoop = await getResultsMetrics(organizationId, deliverability);
+    const resultsLoop = await getResultsMetrics(organizationId, deliverability, {
+      totalLeads,
+      enrichedLeads,
+      scoredLeads,
+      generatedLeads,
+      approvedLeads,
+      sentLeads,
+      interestedLeads,
+      sentMessages,
+      repliedMessages,
+      totalSignals,
+    });
+
+    const pipelineFunnel = {
+      discovered: resultsLoop.discovered,
+      qualified: resultsLoop.qualified,
+      contacted: resultsLoop.contacted,
+      replied: resultsLoop.replies,
+      interested: resultsLoop.interested,
+      meetingsBooked: resultsLoop.meetings,
+      positiveReplyRate: resultsLoop.positiveReplyRate,
+      replyRate: resultsLoop.replyRate,
+      conversionRate: resultsLoop.conversionRate,
+      deliveryRate: resultsLoop.deliveryRate,
+      bounceRate: resultsLoop.bounceRate,
+      stages: resultsLoop.stages,
+    };
 
     return ok({
         leads: {
@@ -143,7 +167,7 @@ export async function GET() {
         campaigns,
         recentActivities,
         recentPipelineRuns,
-        // New data
+        // Memory & queue stats
         memory: {
           categories: memoryStats.map(m => ({ category: m.category, count: m._count.category, avgScore: m._avg.score?.toFixed(2) || '0' })),
           totalEntries: memoryStats.reduce((sum, m) => sum + m._count.category, 0),
@@ -151,10 +175,18 @@ export async function GET() {
         queue: queueStats,
         pipelineMetrics,
 
-        // ─── Deliverability & Results Metrics ───
+        // ─── Deliverability & Outcome-Driven Sales Pipeline Metrics ───
         deliverability,
         resultsLoop,
         results: resultsLoop,
+        pipelineFunnel,
+        environment: {
+          resendConfigured: Boolean(process.env.RESEND_API_KEY && process.env.RESEND_API_KEY.trim().length > 0),
+          isSandboxMode: !process.env.RESEND_API_KEY || (process.env.DEFAULT_SENDER_EMAIL || '').includes('resend.dev') || !deliverability.domains.some(d => d.status === 'verified' && !d.domain.includes('resend.dev')),
+          isLocalOnly: !process.env.RESEND_API_KEY || process.env.RESEND_API_KEY.trim().length === 0,
+          verifiedDomainsCount: deliverability.domains.filter(d => d.status === 'verified').length,
+          defaultSender: process.env.DEFAULT_SENDER_EMAIL || 'onboarding@resend.dev',
+        },
       },
     traceId);
   } catch (error) {
@@ -195,6 +227,7 @@ async function getDeliverabilityStats(organizationId: string) {
         complaintRate: d.complaintRate,
         openRate: d.openRate,
         fromEmail: d.fromEmail,
+        fromName: d.fromName,
       })),
       totalSent: eventsSent,
       totalDelivered: eventsDelivered,
@@ -213,37 +246,173 @@ async function getDeliverabilityStats(organizationId: string) {
   }
 }
 
+interface OutcomeCounts {
+  totalLeads: number;
+  enrichedLeads: number;
+  scoredLeads: number;
+  generatedLeads: number;
+  approvedLeads: number;
+  sentLeads: number;
+  interestedLeads: number;
+  sentMessages: number;
+  repliedMessages: number;
+  totalSignals: number;
+}
+
 async function getResultsMetrics(
   organizationId: string,
   deliverability: Awaited<ReturnType<typeof getDeliverabilityStats>>,
+  counts?: OutcomeCounts,
 ) {
   try {
-    // The RESULTS LOOP: signals found → emails generated → emails sent → replies → meetings → revenue
-    const signalsFound = await db.signal.count({ where: { organizationId } });
+    // The OUTCOME-DRIVEN SALES PIPELINE:
+    // Discovered -> Qualified -> Emails Sent -> Replies -> Positive Replies (North Star) -> Meetings Booked
+    const signalsFound = counts?.totalSignals ?? (await db.signal.count({ where: { organizationId } }));
     const emailsGenerated = await db.outreachMessage.count({ where: { organizationId, status: { in: ['generated', 'approved', 'sent', 'delivered', 'replied'] } } });
-    const emailsSent = await db.emailEvent.count({ where: { organizationId, eventType: 'sent' } });
+    const emailsSentEvent = await db.emailEvent.count({ where: { organizationId, eventType: 'sent' } });
     const emailsDelivered = await db.emailEvent.count({ where: { organizationId, eventType: 'delivered' } });
-    const repliesReceived = await db.outreachMessage.count({ where: { organizationId, status: 'replied' } });
-    const interestedLeads = await db.lead.count({ where: { organizationId, status: 'interested' } });
+    const repliesEvent = await db.outreachMessage.count({ where: { organizationId, status: 'replied' } });
+    const interestedLeads = counts?.interestedLeads ?? (await db.lead.count({ where: { organizationId, status: 'interested' } }));
     const meetingsBooked = await db.replyClassification.count({ where: { organizationId, nextAction: 'escalate' } });
 
-    const replyRate = emailsDelivered > 0 ? (repliesReceived / emailsDelivered) : 0;
-    const positiveReplyRate = repliesReceived > 0 ? (interestedLeads / repliesReceived) : 0;
-    const conversionRate = emailsSent > 0 ? (interestedLeads / emailsSent) : 0;
+    // Realign counts to respect real database state
+    const discovered = counts?.totalLeads ?? (await db.lead.count({ where: { organizationId, isBlacklisted: false } }));
+    const qualified = counts ? (counts.enrichedLeads + counts.scoredLeads + counts.generatedLeads + counts.approvedLeads + counts.sentLeads + counts.interestedLeads) : await db.lead.count({ where: { organizationId, status: { notIn: ['new', 'blacklisted'] } } });
+    const contacted = Math.max(counts?.sentMessages ?? 0, emailsSentEvent);
+    const repliesReceived = Math.max(counts?.repliedMessages ?? 0, repliesEvent);
+    const positiveReplies = interestedLeads;
+
+    // Rates
+    const deliveryRate = deliverability.deliveryRate;
+    const replyRate = (contacted > 0 ? (repliesReceived / contacted) : (emailsDelivered > 0 ? repliesReceived / emailsDelivered : 0)) * 100;
+    const positiveReplyRate = (repliesReceived > 0 ? (positiveReplies / repliesReceived) : (contacted > 0 ? (positiveReplies / contacted) : 0)) * 100;
+    const meetingConversionRate = (positiveReplies > 0 ? (meetingsBooked / positiveReplies) : (repliesReceived > 0 ? (meetingsBooked / repliesReceived) : 0)) * 100;
+    const overallConversionRate = discovered > 0 ? (meetingsBooked / discovered) * 100 : 0;
+    const qualificationRate = discovered > 0 ? (qualified / discovered) * 100 : 0;
+
+    const stages = [
+      {
+        id: 'discovered',
+        label: 'Prospects Discovered',
+        stageNumber: 1,
+        count: discovered,
+        description: 'Autonomous multi-channel intent signals identified and ingested',
+        conversionRate: 100,
+        stepConversionRate: qualificationRate,
+        dropOffCount: Math.max(0, discovered - qualified),
+        benchmarkRate: 100,
+        color: 'blue',
+      },
+      {
+        id: 'qualified',
+        label: 'Qualified',
+        stageNumber: 2,
+        count: qualified,
+        description: 'AI-validated ICP match score, technographic fit, and verified MX mailboxes',
+        conversionRate: qualificationRate,
+        stepConversionRate: qualified > 0 ? Math.min(100, (contacted / qualified) * 100) : 0,
+        dropOffCount: Math.max(0, qualified - contacted),
+        benchmarkRate: 75.0,
+        color: 'indigo',
+      },
+      {
+        id: 'contacted',
+        label: 'Emails Sent',
+        stageNumber: 3,
+        count: contacted,
+        description: 'Dispatched through 7-gate deliverability circuit breaker with jitter pacing',
+        conversionRate: discovered > 0 ? (contacted / discovered) * 100 : 0,
+        stepConversionRate: replyRate,
+        dropOffCount: Math.max(0, contacted - repliesReceived),
+        benchmarkRate: 50.0,
+        color: 'purple',
+      },
+      {
+        id: 'replied',
+        label: 'Inbound Replies',
+        stageNumber: 4,
+        count: repliesReceived,
+        description: 'Inbound prospect responses classified by AI Smart Inbox',
+        conversionRate: discovered > 0 ? (repliesReceived / discovered) * 100 : 0,
+        stepConversionRate: repliesReceived > 0 ? (positiveReplies / repliesReceived) * 100 : 0,
+        dropOffCount: Math.max(0, repliesReceived - positiveReplies),
+        benchmarkRate: 15.0,
+        color: 'teal',
+      },
+      {
+        id: 'interested',
+        label: 'Positive Replies',
+        stageNumber: 5,
+        isNorthStar: true,
+        count: positiveReplies,
+        description: '⭐ North Star Metric: High-intent prospects, demo inquiries, and pricing questions',
+        conversionRate: discovered > 0 ? (positiveReplies / discovered) * 100 : 0,
+        stepConversionRate: meetingConversionRate,
+        dropOffCount: Math.max(0, positiveReplies - meetingsBooked),
+        benchmarkRate: 25.0,
+        color: 'amber',
+      },
+      {
+        id: 'meetings_booked',
+        label: 'Meetings Booked',
+        stageNumber: 6,
+        count: meetingsBooked,
+        description: 'Qualified sales calls routed to Cal.com / calendar booking links',
+        conversionRate: overallConversionRate,
+        stepConversionRate: 100,
+        dropOffCount: 0,
+        benchmarkRate: 15.0,
+        color: 'emerald',
+      },
+    ];
 
     return {
+      // Legacy backward-compatible keys
       signalsFound,
       generatedEmails: emailsGenerated,
-      sentEmails: emailsSent,
+      sentEmails: contacted,
       replies: repliesReceived,
       meetings: meetingsBooked,
-      deliveryRate: deliverability.deliveryRate,
-      replyRate: replyRate * 100,
-      positiveReplyRate: positiveReplyRate * 100,
+      deliveryRate,
+      replyRate,
+      positiveReplyRate,
       bounceRate: deliverability.bounceRate,
-      conversionRate: conversionRate * 100,
+      conversionRate: overallConversionRate,
+
+      // Elevated Outcome-Driven Pipeline fields
+      discovered,
+      qualified,
+      contacted,
+      interested: positiveReplies,
+      positiveReplies,
+      meetingsBooked,
+      qualificationRate,
+      meetingConversionRate,
+      stages,
+      funnelStages: stages,
     };
   } catch {
-    return { signalsFound: 0, generatedEmails: 0, sentEmails: 0, replies: 0, meetings: 0, deliveryRate: 0, replyRate: 0, positiveReplyRate: 0, bounceRate: 0, conversionRate: 0 };
+    return {
+      signalsFound: 0,
+      generatedEmails: 0,
+      sentEmails: 0,
+      replies: 0,
+      meetings: 0,
+      deliveryRate: 0,
+      replyRate: 0,
+      positiveReplyRate: 0,
+      bounceRate: 0,
+      conversionRate: 0,
+      discovered: 0,
+      qualified: 0,
+      contacted: 0,
+      interested: 0,
+      positiveReplies: 0,
+      meetingsBooked: 0,
+      qualificationRate: 0,
+      meetingConversionRate: 0,
+      stages: [],
+      funnelStages: [],
+    };
   }
 }

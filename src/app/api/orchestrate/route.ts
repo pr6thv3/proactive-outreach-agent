@@ -94,7 +94,7 @@ const ACTION_ROLES: Record<OrchestrateAction['action'], WorkspaceRole> = {
 export async function POST(request: NextRequest) {
   let traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const raw = await request.json();
     if (typeof raw?.traceId === 'string' && raw.traceId.trim()) {
       traceId = raw.traceId.trim();
@@ -113,10 +113,10 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const runs = await db.pipelineRun.findMany({
       where: { organizationId: context.organizationId },
       orderBy: { createdAt: 'desc' },

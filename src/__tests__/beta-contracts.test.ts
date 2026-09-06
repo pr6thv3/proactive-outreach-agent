@@ -79,9 +79,7 @@ async function runTests() {
   const org = await db.organization.create({
     data: {
       workspaceKey: 'test_org_1',
-      clerkOrgId: 'org_1',
       name: 'Test Org 1',
-      ownerUserId: 'user_1',
     },
   });
 
@@ -172,7 +170,7 @@ async function runTests() {
   assertEqual(snap.signals[0].sourceUrl, 'https://example.com/blog/raised-5m', 'Citations preserved inside snapshot');
   assertEqual(snap.signals[0].citationQuality, 'strong', 'Citation quality preserved in snapshot');
   assertEqual(snap.signals[0].relevance, 0.9, 'Relevance preserved in snapshot');
-  assertEqual(snap.signals[0].createdAt, signal.detectedAt.toISOString(), 'createdAt (detectedAt ISO) preserved in snapshot');
+  assertEqual(snap.signals[0].createdAt, signal.detectedAt ? signal.detectedAt.toISOString() : undefined, 'createdAt (detectedAt ISO) preserved in snapshot');
 
   // ═══════════════════════════════════════════════════════
   // TEST SUITE 2: TENANT SCOPING
@@ -182,9 +180,7 @@ async function runTests() {
   const org2 = await db.organization.create({
     data: {
       workspaceKey: 'test_org_2',
-      clerkOrgId: 'org_2',
       name: 'Test Org 2',
-      ownerUserId: 'user_2',
     },
   });
 
@@ -254,6 +250,14 @@ async function runTests() {
       status: 'approved',
       approvedAt: new Date(),
       approvedBy: 'user_1',
+    },
+  });
+
+  await db.lead.update({
+    where: { id: lead.id },
+    data: {
+      emailVerified: true,
+      status: 'approved',
     },
   });
 

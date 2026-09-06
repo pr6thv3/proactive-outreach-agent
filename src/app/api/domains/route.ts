@@ -9,10 +9,10 @@ import { getWarmupStatus, resetWarmup } from '@/lib/deliverability/warmup-manage
 import { requireRole, requireWorkspace } from '@/lib/auth/context';
 import { createTraceId, fail, handleApiError, ok } from '@/lib/api/responses';
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const domains = await db.sendingDomain.findMany({
       where: { organizationId: context.organizationId },
       orderBy: { reputationScore: 'desc' },
@@ -47,7 +47,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireRole('admin');
+    const context = await requireRole('admin', request);
     const body = await request.json();
     const { domain, fromEmail, fromName, replyTo } = body;
 
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireRole('admin');
+    const context = await requireRole('admin', request);
     const body = await request.json();
     const { domainId, action } = body;
 
@@ -119,7 +119,7 @@ export async function PATCH(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireRole('admin');
+    const context = await requireRole('admin', request);
     const body = await request.json();
     const { domainId } = body;
 

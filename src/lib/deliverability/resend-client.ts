@@ -71,12 +71,15 @@ export async function sendEmailViaResend(params: SendEmailParams): Promise<SendE
 
     const resend = getResend();
 
-    // Build tracking headers
+    // Build tracking headers & upstream idempotency key
     const trackingHeaders: Record<string, string> = {
       'X-Message-Id': params.messageId || '',
       'X-Campaign-Id': params.campaignId || '',
       'X-Lead-Id': params.leadId || '',
     };
+    if (params.messageId) {
+      trackingHeaders['Idempotency-Key'] = params.messageId;
+    }
 
     // List-Unsubscribe header (RFC 8058) — required for good deliverability
     if (params.domainId) {

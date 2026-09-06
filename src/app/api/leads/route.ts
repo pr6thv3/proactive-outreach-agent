@@ -9,7 +9,7 @@ import { createTraceId, fail, handleApiError, ok } from '@/lib/api/responses';
 export async function GET(request: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status');
     const search = searchParams.get('search');
@@ -22,14 +22,14 @@ export async function GET(request: NextRequest) {
       where.OR = [{ name: { contains: search } }, { email: { contains: search } }, { company: { contains: search } }];
     }
 
-    const [leads, total] = await Promise.all([
+    const [rawLeads, total] = await Promise.all([
       db.lead.findMany({
         where,
         include: {
           signals: { orderBy: { relevance: 'desc' }, take: 5 },
-          messages: { take: 3, orderBy: { createdAt: 'desc' } },
+          outreachEmails: { take: 3, orderBy: { createdAt: 'desc' } },
           activities: { take: 5, orderBy: { createdAt: 'desc' } },
-          _count: { select: { signals: true, messages: true, activities: true } },
+          _count: { select: { signals: true, outreachEmails: true, activities: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,
@@ -37,6 +37,15 @@ export async function GET(request: NextRequest) {
       }),
       db.lead.count({ where }),
     ]);
+
+    const leads = rawLeads.map((lead: any) => ({
+      ...lead,
+      messages: lead.outreachEmails || [],
+      _count: {
+        ...lead._count,
+        messages: lead._count?.outreachEmails ?? 0,
+      },
+    }));
 
     return ok({ leads, total, page, limit }, traceId);
   } catch (error) {
@@ -47,7 +56,7 @@ export async function GET(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireRole('member');
+    const context = await requireRole('member', request);
     const { searchParams } = new URL(request.url);
     const leadId = searchParams.get('id');
     if (!leadId) return fail('id required', 400, 'validation_error', traceId);

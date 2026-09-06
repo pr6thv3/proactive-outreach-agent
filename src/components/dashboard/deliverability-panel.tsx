@@ -39,14 +39,20 @@ function fmt(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-function statusColor(status: string): string {
-  switch (status) {
-    case 'verified': return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
-    case 'pending': return 'bg-amber-500/20 text-amber-400 border-amber-500/30';
-    case 'failed': return 'bg-red-500/20 text-red-400 border-red-500/30';
-    case 'suspended': return 'bg-slate-500/20 text-slate-400 border-slate-500/30';
-    default: return 'bg-slate-500/20 text-slate-400 border-slate-500/30';
+function getUnifiedStatus(domain: { status?: string; spfVerified?: boolean; dkimVerified?: boolean; dmarcVerified?: boolean }) {
+  const statusLower = (domain?.status || '').toLowerCase();
+  if (statusLower === 'suspended') {
+    return { label: 'Suspended', color: 'bg-red-950 text-red-400 border-red-800' };
   }
+  const isVerified = statusLower === 'verified' || statusLower === 'active' || (domain.spfVerified && domain.dkimVerified && domain.dmarcVerified);
+  if (isVerified) {
+    return { label: 'ACTIVE / Verified', color: 'bg-emerald-950 text-emerald-400 border-emerald-800' };
+  }
+  return { label: 'Verification Pending', color: 'bg-amber-950 text-amber-400 border-amber-800' };
+}
+
+function statusColor(status?: string): string {
+  return getUnifiedStatus({ status }).color;
 }
 
 function repColor(score: number): string {
@@ -72,15 +78,35 @@ function rateColor(rate: number, inverse = false): string {
 // ─── DNS Record Data ────────────────────────────────
 interface DnsRecord {
   type: string;
+  name: string;
   host: string;
   value: string;
+  explanation: string;
 }
 
 function getDnsRecords(domain: string): DnsRecord[] {
   return [
-    { type: 'TXT', host: domain, value: `v=spf1 include:outbound.${domain} ~all` },
-    { type: 'CNAME', host: `em.${domain}`, value: `u12345.wl.sendgrid.net` },
-    { type: 'TXT', host: `_dmarc.${domain}`, value: `v=DMARC1; p=none; rua=mailto:dmarc@${domain}` },
+    {
+      type: 'CNAME',
+      name: 'DKIM (DomainKeys Identified Mail)',
+      host: `resend._domainkey.${domain}`,
+      value: 'resend.com',
+      explanation: 'Attaches a tamper-proof cryptographic signature proving authenticity.',
+    },
+    {
+      type: 'TXT',
+      name: 'SPF (Sender Policy Framework)',
+      host: domain,
+      value: 'v=spf1 include:resend.com ~all',
+      explanation: 'Authorizes mail servers to send outreach emails on behalf of this domain.',
+    },
+    {
+      type: 'TXT',
+      name: 'DMARC (Authentication & Reporting)',
+      host: `_dmarc.${domain}`,
+      value: 'v=DMARC1; p=none; rua=mailto:dmarc@resend.com',
+      explanation: 'Protects company brand reputation against spoofing and phishing.',
+    },
   ];
 }
 
@@ -244,9 +270,14 @@ export function DeliverabilityPanel() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white">{d.domain}</span>
-                    <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${statusColor(d.status)}`}>
-                      {d.status}
-                    </Badge>
+                    {(() => {
+                      const statusInfo = getUnifiedStatus(d);
+                      return (
+                        <Badge variant="outline" className={`text-[10px] px-2 py-0.5 font-bold ${statusInfo.color}`}>
+                          {statusInfo.label}
+                        </Badge>
+                      );
+                    })()}
                   </div>
                   {d.fromEmail && (
                     <span className="text-[11px] text-slate-500">{d.fromEmail}</span>
@@ -259,25 +290,25 @@ export function DeliverabilityPanel() {
                     {d.spfVerified ? (
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
                     ) : (
-                      <XCircle className="w-3.5 h-3.5 text-red-400" />
+                      <XCircle className="w-3.5 h-3.5 text-amber-400" />
                     )}
-                    <span className={d.spfVerified ? 'text-emerald-400' : 'text-red-400'}>SPF</span>
+                    <span className={d.spfVerified ? 'text-emerald-400' : 'text-amber-400'}>SPF</span>
                   </div>
                   <div className="flex items-center gap-1 text-xs">
                     {d.dkimVerified ? (
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
                     ) : (
-                      <XCircle className="w-3.5 h-3.5 text-red-400" />
+                      <XCircle className="w-3.5 h-3.5 text-amber-400" />
                     )}
-                    <span className={d.dkimVerified ? 'text-emerald-400' : 'text-red-400'}>DKIM</span>
+                    <span className={d.dkimVerified ? 'text-emerald-400' : 'text-amber-400'}>DKIM</span>
                   </div>
                   <div className="flex items-center gap-1 text-xs">
                     {d.dmarcVerified ? (
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
                     ) : (
-                      <XCircle className="w-3.5 h-3.5 text-red-400" />
+                      <XCircle className="w-3.5 h-3.5 text-amber-400" />
                     )}
-                    <span className={d.dmarcVerified ? 'text-emerald-400' : 'text-red-400'}>DMARC</span>
+                    <span className={d.dmarcVerified ? 'text-emerald-400' : 'text-amber-400'}>DMARC</span>
                   </div>
                 </div>
 
@@ -317,7 +348,7 @@ export function DeliverabilityPanel() {
   // ─── DNS Setup Section ───
   const dnsRecords = selectedDomain ? getDnsRecords(selectedDomain.domain) : [];
   const needsDns = selectedDomain && (!selectedDomain.spfVerified || !selectedDomain.dkimVerified || !selectedDomain.dmarcVerified);
-  const noVerifiedDomain = domains.length > 0 && !domains.some(d => d.status === 'verified');
+  const noVerifiedDomain = domains.length > 0 && !domains.some(d => d.status === 'verified' || d.status === 'active' || (d.spfVerified && d.dkimVerified && d.dmarcVerified));
 
   const dnsSection = (
     <div className="space-y-3">
@@ -326,7 +357,7 @@ export function DeliverabilityPanel() {
           <Shield className="w-4 h-4 text-amber-400" />
           Domain DNS Setup
         </h3>
-        {selectedDomain && selectedDomain.status !== 'verified' && (
+        {selectedDomain && selectedDomain.status !== 'verified' && selectedDomain.status !== 'active' && (
           <span className="text-[11px] text-amber-400/80 flex items-center gap-1.5 animate-pulse">
             <RefreshCw className="w-3 h-3 animate-spin" />
             Auto-polling Resend status every 60s...
@@ -345,16 +376,16 @@ export function DeliverabilityPanel() {
             <div>
               <span className="text-sm text-white font-semibold">{selectedDomain.domain}</span>
               <p className="text-xs text-slate-400 mt-0.5">
-                Add the following DNS records at your registrar (GoDaddy, Namecheap, Cloudflare, AWS Route 53):
+                Add the following DNS records at your registrar (Cloudflare, GoDaddy, Namecheap, AWS Route 53):
               </p>
             </div>
             {(needsDns || noVerifiedDomain) ? (
-              <Badge variant="outline" className="text-[10px] px-2 py-0.5 bg-amber-500/20 text-amber-400 border-amber-500/30 shrink-0">
-                <AlertTriangle className="w-3 h-3 mr-1" />DNS Verification Pending
+              <Badge variant="outline" className="text-[10px] px-2.5 py-0.5 bg-amber-950 text-amber-400 border-amber-800 shrink-0 font-semibold">
+                <AlertTriangle className="w-3 h-3 mr-1" />Verification Pending
               </Badge>
             ) : (
-              <Badge variant="outline" className="text-[10px] px-2 py-0.5 bg-emerald-500/20 text-emerald-400 border-emerald-500/30 shrink-0">
-                <CheckCircle className="w-3 h-3 mr-1" />Domain Verified & Ready
+              <Badge variant="outline" className="text-[10px] px-2.5 py-0.5 bg-emerald-950 text-emerald-400 border-emerald-800 shrink-0 font-semibold">
+                <CheckCircle className="w-3 h-3 mr-1" />ACTIVE / Verified
               </Badge>
             )}
           </div>
@@ -364,34 +395,40 @@ export function DeliverabilityPanel() {
               <div key={i} className="rounded-lg border border-slate-700/60 bg-slate-800/40 p-3.5 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-[10px] px-2 py-0.5 font-semibold bg-slate-700 text-slate-200 border-slate-600">
+                    <Badge variant="outline" className="text-[10px] px-2 py-0.5 font-semibold bg-slate-700 text-slate-200 border-slate-600 font-mono">
                       {rec.type}
                     </Badge>
-                    <span className="text-xs text-slate-400">Host:</span>
-                    <code className="text-xs text-emerald-400 font-mono font-medium">{rec.host}</code>
-                    <CopyButton text={rec.host} />
+                    <span className="text-xs text-slate-300 font-medium">{rec.name}</span>
                   </div>
                   <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
-                    i === 0 ? (selectedDomain.spfVerified ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30') :
-                    i === 1 ? (selectedDomain.dkimVerified ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30') :
-                    (selectedDomain.dmarcVerified ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30')
+                    i === 0 ? (selectedDomain.spfVerified ? 'bg-emerald-950 text-emerald-400 border-emerald-800' : 'bg-amber-950 text-amber-400 border-amber-800') :
+                    i === 1 ? (selectedDomain.dkimVerified ? 'bg-emerald-950 text-emerald-400 border-emerald-800' : 'bg-amber-950 text-amber-400 border-amber-800') :
+                    (selectedDomain.dmarcVerified ? 'bg-emerald-950 text-emerald-400 border-emerald-800' : 'bg-amber-950 text-amber-400 border-amber-800')
                   }`}>
                     {(i === 0 ? selectedDomain.spfVerified : i === 1 ? selectedDomain.dkimVerified : selectedDomain.dmarcVerified) ? 'Verified' : 'Pending'}
                   </Badge>
                 </div>
 
                 <p className="text-[11px] text-slate-400 font-normal">
-                  {i === 0 && 'Authorizes Alex to send outreach emails on behalf of your company domain.'}
-                  {i === 1 && 'Attaches a tamper-proof digital signature verifying your emails are authentic.'}
-                  {i === 2 && 'Protects your company domain against email spoofing and phishing attempts.'}
+                  {rec.explanation}
                 </p>
 
-                <div className="flex items-center gap-2 pt-1 border-t border-slate-700/30">
-                  <span className="text-xs text-slate-400 shrink-0">Value:</span>
-                  <div className="flex-1 bg-slate-950/80 rounded px-2.5 py-1.5 overflow-x-auto border border-slate-800">
-                    <code className="text-[11px] text-amber-300 font-mono break-all">{rec.value}</code>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-slate-700/30">
+                  <div className="flex items-center justify-between gap-1.5 bg-slate-900/90 rounded px-2.5 py-1.5 border border-slate-800">
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[9px] text-slate-500 uppercase block font-mono">Host</span>
+                      <code className="text-xs text-emerald-400 font-mono truncate block" title={rec.host}>{rec.host}</code>
+                    </div>
+                    <CopyButton text={rec.host} />
                   </div>
-                  <CopyButton text={rec.value} />
+
+                  <div className="flex items-center justify-between gap-1.5 bg-slate-900/90 rounded px-2.5 py-1.5 border border-slate-800">
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[9px] text-slate-500 uppercase block font-mono">Value</span>
+                      <code className="text-[11px] text-amber-300 font-mono truncate block" title={rec.value}>{rec.value}</code>
+                    </div>
+                    <CopyButton text={rec.value} />
+                  </div>
                 </div>
               </div>
             ))}
@@ -412,7 +449,7 @@ export function DeliverabilityPanel() {
                 )}
                 Verify DNS Now
               </Button>
-              {selectedDomain.status === 'verified' && (
+              {(selectedDomain.status === 'verified' || selectedDomain.status === 'active' || (selectedDomain.spfVerified && selectedDomain.dkimVerified && selectedDomain.dmarcVerified)) && (
                 <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
                   <CheckCircle className="w-4 h-4" />Domain verified — Ready to start campaign!
                 </span>

@@ -9,7 +9,7 @@ import { createTraceId, handleApiError, ok } from '@/lib/api/responses';
 export async function GET(request: NextRequest) {
   const traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const { searchParams } = new URL(request.url);
     const eventType = searchParams.get('type');
     const domainId = searchParams.get('domainId');

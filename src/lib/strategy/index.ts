@@ -1,5 +1,6 @@
 import { db } from '@/lib/db';
-import { Lead, Signal, OutreachMessage, ReplyClassification, AgentMemory, Campaign } from '@prisma/client';
+import { Lead, Signal, OutreachEmail as OutreachMessage, AgentMemory, Campaign } from '@prisma/client';
+type ReplyClassification = any;
 import { StrategyName, StrategyRecommendation, StrategyContext, CooldownCheckResult } from './types';
 
 export function matchesPersonaPattern(title?: string | null): boolean {
@@ -31,7 +32,7 @@ export function checkStrategyCooldown(
 ): CooldownCheckResult {
   const now = Date.now();
   const strategyMsgs = previousMessages.filter(
-    m => m.strategy === strategy && (m.status === 'sent' || m.status === 'approved' || m.status === 'delivered')
+    m => (m as any).strategy === strategy && (m.status === 'sent' || m.status === 'approved' || m.status === 'delivered')
   );
 
   for (const msg of strategyMsgs) {
@@ -54,7 +55,7 @@ export function checkStrategyCooldown(
 export function shouldFollowUp(previousMessages: OutreachMessage[], campaign: Campaign | null): boolean {
   if (!previousMessages || previousMessages.length === 0) return false;
   // Sort by sequencePos descending to find the last message
-  const sorted = [...previousMessages].sort((a, b) => b.sequencePos - a.sequencePos);
+  const sorted = [...previousMessages].sort((a, b) => ((b as any).sequencePos ?? 0) - ((a as any).sequencePos ?? 0));
   const lastMsg = sorted[0];
   if (lastMsg.status !== 'sent') return false;
 
@@ -74,7 +75,7 @@ export function shouldFollowUp(previousMessages: OutreachMessage[], campaign: Ca
     }
   }
 
-  const targetOffset = offsets[lastMsg.sequencePos];
+  const targetOffset = offsets[(lastMsg as any).sequencePos ?? 0];
   if (targetOffset === undefined) return false;
 
   const daysSinceLastSend = (Date.now() - new Date(lastMsg.sentAt || lastMsg.createdAt).getTime()) / (1000 * 60 * 60 * 24);
@@ -95,7 +96,7 @@ export function isExitConditionMet(strategy: StrategyName, context: StrategyCont
       const hasActiveSignal = signals.some(
         s =>
           s.confidence >= 0.7 &&
-          s.urgency >= 0.5 &&
+          (s.urgency ?? 0.5) >= 0.5 &&
           (!s.expiresAt || new Date(s.expiresAt) > new Date())
       );
       return !hasActiveSignal;
@@ -111,7 +112,7 @@ export function isExitConditionMet(strategy: StrategyName, context: StrategyCont
       return lead.status === 'replied' || hasBounced;
 
     case 'tech-migration':
-      const techMsgs = previousMessages?.filter(m => m.strategy === 'tech-migration') || [];
+      const techMsgs = previousMessages?.filter(m => (m as any).strategy === 'tech-migration') || [];
       return lead.status === 'replied' || techMsgs.length >= 3;
 
     case 'traffic-seo-decline':
@@ -124,7 +125,7 @@ export function isExitConditionMet(strategy: StrategyName, context: StrategyCont
       return lead.status === 'replied';
 
     case 'persona-based':
-      const personaMsgs = previousMessages?.filter(m => m.strategy === 'persona-based') || [];
+      const personaMsgs = previousMessages?.filter(m => (m as any).strategy === 'persona-based') || [];
       return lead.status === 'replied' || personaMsgs.length >= 3;
 
     case 'personalization-hook':
@@ -136,7 +137,7 @@ export function isExitConditionMet(strategy: StrategyName, context: StrategyCont
     case 'breakup':
       return (
         lead.status === 'replied' ||
-        (previousMessages?.some(m => m.strategy === 'breakup' && m.status === 'sent') || false)
+        (previousMessages?.some(m => (m as any).strategy === 'breakup' && m.status === 'sent') || false)
       );
 
     case 'reply-driven':
@@ -164,7 +165,7 @@ export function isEntryConditionMet(strategy: StrategyName, context: StrategyCon
         signals.some(
           s =>
             s.confidence >= 0.7 &&
-            s.urgency >= 0.5 &&
+            (s.urgency ?? 0.5) >= 0.5 &&
             (!s.expiresAt || new Date(s.expiresAt) > new Date())
         )
       );
@@ -173,21 +174,21 @@ export function isEntryConditionMet(strategy: StrategyName, context: StrategyCon
       return signals.some(
         s =>
           (s.type === 'funding_round' || s.type === 'growth') &&
-          now - new Date(s.detectedAt).getTime() < 45 * 24 * 60 * 60 * 1000
+          s.detectedAt ? (now - new Date(s.detectedAt).getTime() < 45 * 24 * 60 * 60 * 1000) : true
       );
 
     case 'hiring-spike':
       return signals.some(
         s =>
           (s.type === 'hiring_spike' || s.type === 'engineering_hiring_spike') &&
-          now - new Date(s.detectedAt).getTime() < 30 * 24 * 60 * 60 * 1000
+          s.detectedAt ? (now - new Date(s.detectedAt).getTime() < 30 * 24 * 60 * 60 * 1000) : true
       );
 
     case 'job-change':
       return signals.some(
         s =>
           s.type === 'job_change' &&
-          now - new Date(s.detectedAt).getTime() < 90 * 24 * 60 * 60 * 1000
+          s.detectedAt ? (now - new Date(s.detectedAt).getTime() < 90 * 24 * 60 * 60 * 1000) : true
       );
 
     case 'tech-migration':
@@ -207,7 +208,7 @@ export function isEntryConditionMet(strategy: StrategyName, context: StrategyCon
       return signals.some(
         s =>
           (s.type === 'ai_adoption' || s.type === 'ai_adoption_signal') &&
-          now - new Date(s.detectedAt).getTime() < 60 * 24 * 60 * 60 * 1000
+          s.detectedAt ? (now - new Date(s.detectedAt).getTime() < 60 * 24 * 60 * 60 * 1000) : true
       );
 
     case 'persona-based':
@@ -222,7 +223,7 @@ export function isEntryConditionMet(strategy: StrategyName, context: StrategyCon
 
     case 'breakup': {
       const sentMessages = previousMessages?.filter(m => m.status === 'sent') || [];
-      const hasBreakupSent = previousMessages?.some(m => m.strategy === 'breakup') || false;
+      const hasBreakupSent = previousMessages?.some(m => (m as any).strategy === 'breakup') || false;
       const daysSinceLastContact = lead.lastContacted
         ? (now - new Date(lead.lastContacted).getTime()) / (1000 * 60 * 60 * 24)
         : 0;
@@ -251,7 +252,7 @@ export function getSignalConfidenceForStrategy(
       eligibleSignals = signals.filter(
         s =>
           s.confidence >= 0.7 &&
-          s.urgency >= 0.5 &&
+          (s.urgency ?? 0.5) >= 0.5 &&
           (!s.expiresAt || new Date(s.expiresAt) > new Date())
       );
       break;
@@ -448,17 +449,20 @@ export class StrategySelector {
       },
     });
 
-    const orConditions: { leadId?: string; industry?: string; persona?: string }[] = [];
-    if (leadId) orConditions.push({ leadId });
-    if (lead.company) orConditions.push({ industry: lead.company });
-    if (lead.title) orConditions.push({ persona: lead.title });
-
-    const memories = await db.agentMemory.findMany({
-      where: {
-        organizationId,
-        ...(orConditions.length > 0 ? { OR: orConditions } : {}),
-      },
+    const rawMemories = await db.agentMemory.findMany({
+      where: scopedWhere,
       orderBy: { score: 'desc' },
+    });
+
+    const memories = rawMemories.filter((m: any) => {
+      if (leadId && m.leadId === leadId) return true;
+      if (!m.leadId) return true;
+      try {
+        const val = typeof m.value === 'string' ? JSON.parse(m.value) : m.value;
+        if (lead.company && (val?.industry === lead.company || val?.company === lead.company)) return true;
+        if (lead.title && (val?.persona === lead.title || val?.title === lead.title)) return true;
+      } catch {}
+      return false;
     });
 
     const campaign = organizationId

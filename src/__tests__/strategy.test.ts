@@ -12,7 +12,8 @@ import {
   matchesPersonaPattern,
 } from '../lib/strategy/index';
 import { StrategyContext } from '../lib/strategy/types';
-import { Lead, Signal, OutreachMessage, ReplyClassification, AgentMemory } from '@prisma/client';
+import { Lead, Signal, OutreachEmail as OutreachMessage, AgentMemory } from '@prisma/client';
+type ReplyClassification = any;
 
 let passed = 0;
 let failed = 0;
@@ -59,20 +60,16 @@ const createMockLead = (overrides?: Partial<Lead>): Lead => ({
   isBlacklisted: false,
   doNotContact: false,
   lastContacted: null,
-  notes: null,
+
   leadScore: 75,
   signalScore: 80,
   replyProb: 0.5,
   conversionProb: 0.1,
   spamRisk: 0.05,
-  priorityTier: 'hot',
-  nextActionAt: null,
-  autonomyEnabled: false,
-  lastAutonomousRun: null,
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
-});
+}) as unknown as Lead;
 
 const createMockSignal = (overrides?: Partial<Signal>): Signal => ({
   id: 'sig_123',
@@ -82,7 +79,7 @@ const createMockSignal = (overrides?: Partial<Signal>): Signal => ({
   source: 'web_scraper',
   relevance: 0.8,
   confidence: 0.9,
-  rawSnippet: null,
+  score: 85,
   sourceUrl: null,
   sourceTitle: null,
   urgency: 0.8,
@@ -95,7 +92,7 @@ const createMockSignal = (overrides?: Partial<Signal>): Signal => ({
   leadId: 'lead_123',
   createdAt: new Date(),
   ...overrides,
-});
+} as Signal);
 
 // Run Tests
 section('1. Persona Pattern Matcher');
@@ -145,7 +142,7 @@ const recentMsg = {
   evidenceSnapshot: null,
   createdAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
   updatedAt: new Date(),
-} as OutreachMessage;
+} as unknown as OutreachMessage;
 
 assertEqual(
   checkStrategyCooldown('funding-growth', [recentMsg], 30).onCooldown,

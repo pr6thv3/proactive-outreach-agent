@@ -86,13 +86,12 @@ async function main() {
     data: {
       name: orgName,
       slug: orgSlug,
-      clerkOrgId,
       workspaceKey,
       plan: 'starter',
       subscriptionStatus: 'active',
     },
   });
-  console.log(`  ✅ Organization created: ${org.name} (ID: ${org.id}, ClerkOrgID: ${org.clerkOrgId})`);
+  console.log(`  ✅ Organization created: ${org.name} (ID: ${org.id})`);
 
   // 2. Create SendingDomain
   const domain = await db.sendingDomain.create({
@@ -112,7 +111,7 @@ async function main() {
   console.log(`  ✅ Sending domain created: ${domain.domain} (ID: ${domain.id}, Status: ${domain.status})`);
 
   // 3. Create SenderAccount
-  const sender = await db.senderAccount.create({
+  const sender = await (db as any).senderAccount.create({
     data: {
       organizationId: org.id,
       domainId: domain.id,
@@ -145,7 +144,7 @@ async function main() {
   console.log(`  ✅ Campaign created: "${campaign.name}" (ID: ${campaign.id}, Status: ${campaign.status})`);
 
   // Link sender to campaign sender pool
-  await db.campaignSenderPool.create({
+  await (db as any).campaignSenderPool.create({
     data: {
       organizationId: org.id,
       campaignId: campaign.id,

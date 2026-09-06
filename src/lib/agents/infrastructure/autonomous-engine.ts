@@ -73,6 +73,24 @@ export class AutonomousWorkflowEngine {
       learned: 0,
     };
 
+    // Kill-switch: check if autonomy is paused for the workspace
+    const userPref = await db.userPreference.findFirst({
+      where: {
+        OR: [
+          { activeOrgId: this.config.organizationId, autonomyPaused: true },
+          { organization: { id: this.config.organizationId }, autonomyPaused: true },
+        ],
+      },
+    });
+
+    if (userPref?.autonomyPaused) {
+      logger.info('Autonomous workflow cycle halted: autonomy is paused (kill-switch active)', {
+        traceId,
+        agent: 'AutonomousEngine',
+      });
+      return results;
+    }
+
     try {
       // Step 1: DISCOVER — find leads that need processing
       results.discovered = await this.discoverLeads(traceId);
@@ -122,7 +140,6 @@ export class AutonomousWorkflowEngine {
         status: 'new',
         isBlacklisted: false,
         doNotContact: false,
-        autonomyEnabled: true,
       },
       take: this.config.maxDailyDiscoveries,
     });
@@ -252,19 +269,34 @@ export class AutonomousWorkflowEngine {
 
       let count = 0;
       for (const lead of autoApproveLeads) {
-        const generatedMessages = await db.outreachMessage.findMany({
-          where: { organizationId: this.config.organizationId, leadId: lead.id, status: 'generated', sequencePos: 0 },
-          include: { campaign: true },
-        });
-
-        for (const msg of generatedMessages) {
-          if (!msg.campaign?.autoApprovalEnabled) continue;
-          await db.outreachMessage.update({
-            where: { id: msg.id },
-            data: { status: 'approved', approvedAt: new Date(), approvedBy: 'autonomous_engine' },
+        try {
+          const generatedMessages = await db.outreachMessage.findMany({
+            where: { organizationId: this.config.organizationId, leadId: lead.id, status: 'generated', sequencePos: 0 },
+            include: { campaign: true },
           });
-          await db.lead.update({ where: { id: lead.id }, data: { status: 'approved' } });
-          count++;
+
+          for (const msg of generatedMessages) {
+            try {
+              if (!msg.campaign?.autoApprovalEnabled) continue;
+              await db.outreachMessage.update({
+                where: { id: msg.id },
+                data: { status: 'approved', approvedAt: new Date(), approvedBy: 'autonomous_engine' },
+              });
+              await db.lead.update({ where: { id: lead.id }, data: { status: 'approved' } });
+              count++;
+            } catch (err) {
+              logger.error(`Error auto-approving message ${msg.id}`, {
+                error: err instanceof Error ? err.message : String(err),
+                metadata: { messageId: msg.id },
+                leadId: lead.id,
+              });
+            }
+          }
+        } catch (err) {
+          logger.error(`Error processing auto-approval for lead ${lead.id}`, {
+            error: err instanceof Error ? err.message : String(err),
+            leadId: lead.id,
+          });
         }
       }
 
@@ -276,41 +308,61 @@ export class AutonomousWorkflowEngine {
 
   /**
    * Step 6: Schedule sends via job queue
+   * Per-item try/catch error isolation ensures an error on one item logs the failure
+   * and does NOT abort remaining items in the batch.
    */
   private async scheduleSends(traceId: string): Promise<number> {
     const approvedMessages = await db.outreachMessage.findMany({
-      where: { organizationId: this.config.organizationId, status: 'approved', sequencePos: 0 },
-      include: { lead: true },
+      where: {
+        organizationId: this.config.organizationId,
+        status: 'approved',
+        sequencePos: 0,
+        OR: [
+          { campaignId: null },
+          { campaign: { status: { not: 'paused' } } },
+        ],
+      },
+      include: { lead: true, campaign: true },
       take: this.config.maxDailyEngagements,
     });
 
     let count = 0;
     for (const msg of approvedMessages) {
-      const channel = await selectBestChannel(
-        {
-          leadId: msg.leadId,
-          lead: {
-            id: msg.lead.id, name: msg.lead.name, email: msg.lead.email,
-            company: msg.lead.company || undefined, title: msg.lead.title || undefined,
-            url: msg.lead.url || undefined, linkedinUrl: msg.lead.linkedinUrl || undefined,
-            status: msg.lead.status as 'new', source: msg.lead.source,
-            emailVerified: msg.lead.emailVerified, isBlacklisted: msg.lead.isBlacklisted,
-            doNotContact: msg.lead.doNotContact,
+      try {
+        const channel = await selectBestChannel(
+          {
+            leadId: msg.leadId,
+            lead: {
+              id: msg.lead.id, name: msg.lead.name, email: msg.lead.email,
+              company: msg.lead.company || undefined, title: msg.lead.title || undefined,
+              url: msg.lead.url || undefined, linkedinUrl: msg.lead.linkedinUrl || undefined,
+              status: msg.lead.status as 'new', source: msg.lead.source,
+              emailVerified: msg.lead.emailVerified, isBlacklisted: msg.lead.isBlacklisted,
+              doNotContact: msg.lead.doNotContact,
+            },
+            signals: [], previousMessages: [],
           },
-          signals: [], previousMessages: [],
-        },
-        msg.channel as 'email' | 'linkedin' | 'twitter' | 'sms' | 'contact_form',
-      );
+          msg.channel as 'email' | 'linkedin' | 'twitter' | 'sms' | 'contact_form',
+        );
 
-      await enqueueJob('send-email', {
-        organizationId: this.config.organizationId!,
-        leadId: msg.leadId,
-        messageId: msg.id,
-        campaignId: msg.campaignId || undefined,
-        dryRun: false,
-        traceId,
-      });
-      count++;
+        await enqueueJob('send-email', {
+          organizationId: this.config.organizationId!,
+          leadId: msg.leadId,
+          messageId: msg.id,
+          campaignId: msg.campaignId || undefined,
+          dryRun: false,
+          traceId,
+        });
+        count++;
+      } catch (itemError) {
+        logger.error(`Failed to schedule send for message ${msg.id} (isolated per-item error)`, {
+          agent: 'AutonomousEngine',
+          phase: 'act',
+          metadata: { messageId: msg.id },
+          leadId: msg.leadId,
+          error: itemError instanceof Error ? itemError.message : String(itemError),
+        });
+      }
     }
 
     return count;
@@ -325,36 +377,41 @@ export class AutonomousWorkflowEngine {
     // 1. Learn from recent replies
     const recentReplies = await db.replyClassification.findMany({
       where: { organizationId: this.config.organizationId, createdAt: { gte: new Date(Date.now() - 86400000) } },
-      include: { message: { include: { lead: true } } },
     });
 
     for (const reply of recentReplies) {
-      const lead = reply.message.lead;
+      if (!reply.messageId) continue;
+      const message = await db.outreachMessage.findUnique({
+        where: { id: reply.messageId },
+        include: { lead: true },
+      });
+      if (!message || !message.lead) continue;
+      const lead = message.lead;
       const industry = lead.company || undefined;
       const persona = lead.title || undefined;
 
       // Record feedback on the hook/strategy used
-      if (reply.message.strategy) {
+      if (message.strategy) {
         await AgentMemoryService.recordFeedback({
           category: 'persona_pattern',
-          key: `strategy_${reply.message.strategy}_${persona || 'unknown'}`,
+          key: `strategy_${message.strategy}_${persona || 'unknown'}`,
           wasSuccessful: reply.category === 'interested',
           industry,
           persona,
-          channel: reply.message.channel,
+          channel: message.channel,
         });
         learned++;
       }
 
       // Record feedback on the pitch angle
-      if (reply.message.angle) {
+      if (message.angle) {
         await AgentMemoryService.recordFeedback({
           category: 'industry_pattern',
-          key: `angle_${reply.message.angle}_${industry || 'unknown'}`,
+          key: `angle_${message.angle}_${industry || 'unknown'}`,
           wasSuccessful: reply.category === 'interested',
           industry,
           persona,
-          channel: reply.message.channel,
+          channel: message.channel,
         });
         learned++;
       }
@@ -362,11 +419,11 @@ export class AutonomousWorkflowEngine {
       // Record channel effectiveness
       await AgentMemoryService.recordFeedback({
         category: 'channel_effectiveness',
-        key: `channel_${reply.message.channel}_${industry || 'unknown'}_${persona || 'unknown'}`,
+        key: `channel_${message.channel}_${industry || 'unknown'}_${persona || 'unknown'}`,
         wasSuccessful: reply.category === 'interested' || reply.category === 'neutral',
         industry,
         persona,
-        channel: reply.message.channel,
+        channel: message.channel,
       });
       learned++;
     }

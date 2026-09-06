@@ -50,9 +50,7 @@ export async function getWarmupStatus(domainId: string, organizationId?: string)
     await db.sendingDomain.updateMany({
       where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
       data: {
-        warmupDay: daysSinceStart,
-        dailySendsCount: 0,
-        dailySendsDate: today,
+        currentWarmupDay: (domain.currentWarmupDay || 1) + 1,
       },
     });
 
@@ -162,29 +160,27 @@ export async function updateDomainMetrics(domainId: string, event: 'sent' | 'del
   });
   if (!domain) return;
 
-  const updates: Record<string, number> = {};
-  switch (event) {
-    case 'sent': updates.totalSent = domain.totalSent + 1; break;
-    case 'delivered': updates.totalDelivered = domain.totalDelivered + 1; break;
-    case 'bounced': updates.totalBounced = domain.totalBounced + 1; break;
-    case 'opened': updates.totalOpened = domain.totalOpened + 1; break;
-    case 'clicked': updates.totalClicked = domain.totalClicked + 1; break;
-    case 'complained': updates.totalComplained = domain.totalComplained + 1; break;
-  }
+  const orgId = organizationId || domain.organizationId;
+  const [totalSent, totalDelivered, totalBounced, totalComplained, totalOpened, totalClicked] = await Promise.all([
+    db.emailEvent.count({ where: { domainId, eventType: 'sent', ...(orgId ? { organizationId: orgId } : {}) } }),
+    db.emailEvent.count({ where: { domainId, eventType: 'delivered', ...(orgId ? { organizationId: orgId } : {}) } }),
+    db.emailEvent.count({ where: { domainId, eventType: 'bounced', ...(orgId ? { organizationId: orgId } : {}) } }),
+    db.emailEvent.count({ where: { domainId, eventType: 'complained', ...(orgId ? { organizationId: orgId } : {}) } }),
+    db.emailEvent.count({ where: { domainId, eventType: 'opened', ...(orgId ? { organizationId: orgId } : {}) } }),
+    db.emailEvent.count({ where: { domainId, eventType: 'clicked', ...(orgId ? { organizationId: orgId } : {}) } }),
+  ]);
 
-  // Recalculate rates
-  const totalSent = (updates.totalSent ?? domain.totalSent) || 1;
-  const totalDelivered = (updates.totalDelivered ?? domain.totalDelivered) || 1;
+  const sCount = totalSent > 0 ? totalSent : 1;
+  const dCount = totalDelivered > 0 ? totalDelivered : 1;
 
-  const newMetrics: Record<string, number> = {};
-  newMetrics.bounceRate = ((updates.totalBounced ?? domain.totalBounced) / totalSent);
-  newMetrics.complaintRate = ((updates.totalComplained ?? domain.totalComplained) / totalSent);
-  newMetrics.openRate = ((updates.totalOpened ?? domain.totalOpened) / totalDelivered);
-  newMetrics.clickRate = ((updates.totalClicked ?? domain.totalClicked) / totalDelivered);
+  const bounceRate = totalSent > 0 ? totalBounced / sCount : 0;
+  const complaintRate = totalSent > 0 ? totalComplained / sCount : 0;
+  const openRate = totalDelivered > 0 ? totalOpened / dCount : 0;
+  const clickRate = totalDelivered > 0 ? totalClicked / dCount : 0;
 
   await db.sendingDomain.updateMany({
     where: { id: domainId, ...(organizationId ? { organizationId } : {}) },
-    data: { ...updates, ...newMetrics },
+    data: { bounceRate, complaintRate, openRate, clickRate },
   });
 }
 

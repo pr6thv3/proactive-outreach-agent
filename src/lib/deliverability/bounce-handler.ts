@@ -5,6 +5,7 @@ import { db } from '@/lib/db';
 import { addToDncList } from '@/lib/safety';
 import { updateDomainMetrics } from './warmup-manager';
 import { logger } from '@/lib/agents/infrastructure/observability';
+import { checkCircuitBreaker } from '@/lib/risk/circuit-breaker';
 
 export type BounceClassification = 'hard' | 'soft' | 'feedback' | 'unknown';
 
@@ -116,6 +117,17 @@ export async function handleBounce(event: BounceEvent): Promise<void> {
         phase: 'act',
         metadata: { recipient: event.recipient, reason: event.bounceReason },
       });
+  }
+
+  // Trigger instantaneous circuit breaker evaluation
+  if (event.domainId && event.organizationId) {
+    await checkCircuitBreaker({
+      domainId: event.domainId,
+      campaignId: event.campaignId,
+      organizationId: event.organizationId,
+    }).catch((err) => {
+      logger.warn('[BounceHandler] Circuit breaker evaluation warning', { error: err });
+    });
   }
 }
 
@@ -366,4 +378,15 @@ export async function handleUnsubscribe(params: {
       domainId: params.domainId,
     },
   });
+
+  // Trigger instantaneous circuit breaker evaluation on unsubscribe
+  if (params.domainId && params.organizationId) {
+    await checkCircuitBreaker({
+      domainId: params.domainId,
+      campaignId: params.campaignId,
+      organizationId: params.organizationId,
+    }).catch((err) => {
+      logger.warn('[BounceHandler] Circuit breaker evaluation warning on unsubscribe', { error: err });
+    });
+  }
 }

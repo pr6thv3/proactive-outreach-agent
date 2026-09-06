@@ -170,3 +170,63 @@ export async function getPipelineMetrics(hours = 24): Promise<PipelineMetrics[]>
 export function generateTraceId(): string {
   return `trace_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
+
+// ─── Atomic AgentEvent Persistence ─────────────────────
+export interface AgentEventRecordParams {
+  organizationId?: string;
+  pipelineRunId?: string;
+  leadId?: string;
+  campaignId?: string;
+  agentName: string;
+  stepName?: string;
+  phase?: string;
+  level?: LogLevel;
+  message?: string;
+  inputData?: unknown;
+  outputData?: unknown;
+  status?: string;
+  traceId?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+  error?: string;
+}
+
+export async function recordAgentEvent(params: AgentEventRecordParams): Promise<any> {
+  try {
+    const sanitizeJson = (val: unknown) => {
+      if (val === undefined || val === null) return undefined;
+      if (typeof val === 'string') {
+        try {
+          return JSON.parse(val);
+        } catch {
+          return val;
+        }
+      }
+      return val;
+    };
+
+    return await db.agentEvent.create({
+      data: {
+        organizationId: params.organizationId,
+        pipelineRunId: params.pipelineRunId,
+        leadId: params.leadId,
+        campaignId: params.campaignId,
+        agentName: params.agentName,
+        stepName: params.stepName || params.agentName,
+        phase: params.phase,
+        level: params.level || 'info',
+        message: params.message || `${params.agentName} ${params.stepName || ''}`.trim(),
+        inputData: sanitizeJson(params.inputData),
+        outputData: sanitizeJson(params.outputData),
+        status: params.status || 'completed',
+        traceId: params.traceId || logger.getTraceId() || undefined,
+        durationMs: params.durationMs,
+        metadata: params.metadata,
+        error: params.error,
+      },
+    });
+  } catch {
+    // Silently fail so logging failures never break agent execution
+    return null;
+  }
+}

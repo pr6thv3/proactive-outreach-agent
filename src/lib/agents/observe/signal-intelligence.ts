@@ -279,7 +279,7 @@ Return a JSON array of at least 2 signals. Prioritize signals that answer "WHY N
           source: 'signal_intelligence',
           relevance: intel.urgency,
           confidence: intel.confidence,
-          rawSnippet: input.additionalContext?.slice(0, 500) || null,
+          rawData: input.additionalContext ? { snippet: input.additionalContext.slice(0, 500) } : undefined,
           sourceUrl: evidenceSignal?.sourceUrl || null,
           sourceTitle: evidenceSignal?.sourceTitle || null,
           urgency: intel.urgency,

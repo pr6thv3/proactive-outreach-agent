@@ -94,3 +94,15 @@ prisma/schema.sqlite.prisma
 
 # clerk configuration (can include secrets)
 /.clerk/
+
+# Local database and recordings
+*.db
+*.db-journal
+*.db-wal
+recordings/
+*.mp4
+*.webm
+public/*.mp4
+public/*.webm
+.agents/
+

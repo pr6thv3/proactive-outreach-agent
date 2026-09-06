@@ -44,7 +44,7 @@ export async function importCsvAction(input: z.infer<typeof ImportCsvSchema>, co
         continue;
       }
 
-      const existing = existingMap.get(email);
+      const existing = existingMap.get(email) as any;
       if (existing) {
         await db.lead.update({
           where: { id: existing.id },

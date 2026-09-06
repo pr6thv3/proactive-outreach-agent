@@ -33,7 +33,7 @@ export interface MessageRow {
     pitchAngle?: string;
     riskNotes?: string[];
   } | null;
-  lead: { id: string; name: string; email: string; company: string | null; status: string; priorityTier?: string };
+  lead: { id: string; name: string; email: string; company: string | null; status: string; priorityTier?: string; emailVerified?: boolean };
   followUps: Array<{ id: string; type: string; status: string; scheduledAt: string; sequencePos: number; channel?: string }>;
   replies: Array<{ id: string; category: string; confidence: number; replyText: string | null }>;
   createdAt: string;
@@ -218,14 +218,22 @@ interface DashboardState {
   batchGenerate: (leadIds: string[], campaignId?: string) => Promise<void>;
 
   approveMessage: (messageId: string, editedSubject?: string, editedBody?: string) => Promise<void>;
+  rejectMessage: (messageId: string, feedback?: string) => Promise<void>;
+  regenerateDraft: (messageId: string, feedback?: string) => Promise<void>;
   sendMessage: (messageId: string) => Promise<void>;
   approveAndSend: (messageId: string, editedSubject?: string, editedBody?: string) => Promise<void>;
+  batchApproveMessages: (messageIds: string[], feedback?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+  batchRejectMessages: (messageIds: string[], feedback?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+  batchRegenerateMessages: (messageIds: string[], feedback?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+  bulkApproveHighConfidence: (minConfidence?: number) => Promise<{ success: boolean; data?: any; error?: string }>;
 
   classifyReply: (leadId: string, messageId: string, replyText: string) => Promise<void>;
 
   createCampaign: (data: Record<string, unknown>) => Promise<void>;
 
   enableAutonomy: (leadId?: string, campaignId?: string) => Promise<void>;
+  toggleAutopilot: (enabled: boolean) => Promise<void>;
+  pauseAutonomy: (paused: boolean, reason?: string) => Promise<void>;
   runAutonomousCycle: () => Promise<void>;
 
   refreshAll: () => Promise<void>;
@@ -434,6 +442,180 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       if (j.success) { get().addToast('Email approved!', 'success'); await get().refreshAll(); }
       else get().addToast(j.error || 'Approval failed', 'error');
     } catch { get().addToast('Approval failed', 'error'); }
+  },
+
+  rejectMessage: async (messageId, feedback) => {
+    try {
+      const r = await fetch('/api/messages/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reject', messageIds: [messageId], feedback }),
+      });
+      const j = await r.json();
+      if (j.success) { get().addToast('Draft rejected & feedback stored in memory', 'info'); await get().refreshAll(); }
+      else get().addToast(j.error || 'Rejection failed', 'error');
+    } catch { get().addToast('Rejection failed', 'error'); }
+  },
+
+  regenerateDraft: async (messageId, feedback) => {
+    try {
+      get().addToast('Regenerating draft with updated angle...', 'info');
+      const r = await fetch('/api/messages/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'regenerate', messageIds: [messageId], feedback }),
+      });
+      const j = await r.json();
+      if (j.success) { get().addToast('Draft regenerated with fresh angle!', 'success'); await get().refreshAll(); }
+      else get().addToast(j.error || 'Regeneration failed', 'error');
+    } catch { get().addToast('Regeneration failed', 'error'); }
+  },
+
+  batchApproveMessages: async (messageIds, feedback) => {
+    try {
+      const r = await fetch('/api/messages/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'approve', messageIds, feedback }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        get().addToast(`Approved ${j.data?.processedCount || messageIds.length} message(s)!`, 'success');
+        await get().refreshAll();
+        return { success: true, data: j.data };
+      }
+      get().addToast(j.error || 'Batch approval failed', 'error');
+      return { success: false, error: j.error };
+    } catch (e: any) {
+      get().addToast('Batch approval error', 'error');
+      return { success: false, error: e.message };
+    }
+  },
+
+  batchRejectMessages: async (messageIds, feedback) => {
+    try {
+      const r = await fetch('/api/messages/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reject', messageIds, feedback }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        get().addToast(`Dismissed ${j.data?.processedCount || messageIds.length} message(s)`, 'info');
+        await get().refreshAll();
+        return { success: true, data: j.data };
+      }
+      get().addToast(j.error || 'Batch rejection failed', 'error');
+      return { success: false, error: j.error };
+    } catch (e: any) {
+      get().addToast('Batch rejection error', 'error');
+      return { success: false, error: e.message };
+    }
+  },
+
+  batchRegenerateMessages: async (messageIds, feedback) => {
+    try {
+      get().addToast(`Regenerating ${messageIds.length} draft(s)...`, 'info');
+      const r = await fetch('/api/messages/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'regenerate', messageIds, feedback }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        get().addToast(`Regenerated ${j.data?.processedCount || messageIds.length} draft(s)!`, 'success');
+        await get().refreshAll();
+        return { success: true, data: j.data };
+      }
+      get().addToast(j.error || 'Batch regeneration failed', 'error');
+      return { success: false, error: j.error };
+    } catch (e: any) {
+      get().addToast('Batch regeneration error', 'error');
+      return { success: false, error: e.message };
+    }
+  },
+
+  bulkApproveHighConfidence: async (minConfidence = 85) => {
+    try {
+      const generated = get().messages.filter(m => m.status === 'generated');
+      const messageIds = generated.map(m => m.id);
+      if (messageIds.length === 0) {
+        get().addToast('No generated drafts awaiting approval', 'info');
+        return { success: true, data: { processedCount: 0 } };
+      }
+
+      get().addToast(`Validating safety & bulk approving drafts with >${minConfidence}% score...`, 'info');
+      const r = await fetch('/api/messages/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'bulk_approve',
+          messageIds,
+          minConfidence,
+          deliverabilityCheck: true,
+        }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        const approvedCount = j.data?.processedCount || 0;
+        get().addToast(`⚡ Bulk approved ${approvedCount} high-confidence message(s) via 7-gate safety!`, 'success');
+        await get().refreshAll();
+        return { success: true, data: j.data };
+      }
+      get().addToast(j.error || 'Bulk approve failed', 'error');
+      return { success: false, error: j.error };
+    } catch (e: any) {
+      get().addToast('Bulk approve error', 'error');
+      return { success: false, error: e.message };
+    }
+  },
+
+  toggleAutopilot: async (enabled: boolean) => {
+    try {
+      const r = await fetch('/api/autonomy/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        get().addToast(
+          enabled
+            ? '🚀 1-Click Autopilot Mode ACTIVATED! Autonomous loop active.'
+            : '🛡️ HITL Review Mode ACTIVATED. Drafts will await review.',
+          'success'
+        );
+        await get().refreshAll();
+      } else {
+        get().addToast(j.error || 'Failed to toggle autopilot', 'error');
+      }
+    } catch {
+      get().addToast('Failed to toggle autopilot', 'error');
+    }
+  },
+
+  pauseAutonomy: async (paused: boolean, reason?: string) => {
+    try {
+      const r = await fetch('/api/autonomy/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paused, reason }),
+      });
+      const j = await r.json();
+      if (j.success) {
+        get().addToast(
+          paused
+            ? '🛑 Autopilot PAUSED with ZERO state loss! All messages preserved.'
+            : '▶️ Autopilot RESUMED. Continuous SDR loop active.',
+          'info'
+        );
+        await get().refreshAll();
+      } else {
+        get().addToast(j.error || 'Failed to update pause state', 'error');
+      }
+    } catch {
+      get().addToast('Failed to update pause state', 'error');
+    }
   },
 
   sendMessage: async (messageId) => {

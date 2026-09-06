@@ -297,21 +297,33 @@ export async function selectBestChannel(
     { channel: 'contact_form', condition: () => !!context.lead.url },
   ];
 
-  const memoryRecommendations = await db.agentMemory.findMany({
+  const rawRecommendations = await db.agentMemory.findMany({
     where: {
+      ...(context.organizationId ? { organizationId: context.organizationId } : {}),
       category: 'channel_effectiveness',
-      OR: [
-        { industry: context.lead.company || undefined },
-        { persona: context.lead.title || undefined },
-      ],
       score: { gte: 0.5 },
     },
     orderBy: { score: 'desc' },
-    take: 3,
+    take: 10,
   });
 
+  const memoryRecommendations = rawRecommendations.filter((m: any) => {
+    try {
+      const val = typeof m.value === 'string' ? JSON.parse(m.value) : m.value;
+      if (context.lead.company && (val?.industry === context.lead.company || val?.company === context.lead.company)) return true;
+      if (context.lead.title && (val?.persona === context.lead.title || val?.title === context.lead.title)) return true;
+    } catch {}
+    return true;
+  }).slice(0, 3);
+
   if (memoryRecommendations.length > 0) {
-    const bestChannel = memoryRecommendations[0].channel as Channel;
+    let bestChannel: Channel | undefined;
+    try {
+      const val = typeof memoryRecommendations[0].value === 'string' ? JSON.parse(memoryRecommendations[0].value) : memoryRecommendations[0].value;
+      bestChannel = (val?.channel || memoryRecommendations[0].channel || memoryRecommendations[0].key) as Channel;
+    } catch {
+      bestChannel = memoryRecommendations[0].channel as Channel;
+    }
     if (bestChannel && channelAdapters[bestChannel]) {
       const adapter = channelAdapters[bestChannel];
       if (await adapter.canSend(context)) return bestChannel;

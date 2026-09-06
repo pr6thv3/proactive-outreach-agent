@@ -1,4 +1,5 @@
-import { Lead, Signal, OutreachMessage, ReplyClassification, AgentMemory, Campaign } from '@prisma/client';
+import { Lead, Signal, OutreachEmail as OutreachMessage, AgentMemory, Campaign } from '@prisma/client';
+type ReplyClassification = any;
 
 export type StrategyName =
   | 'signal-led'

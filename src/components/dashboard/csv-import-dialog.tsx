@@ -6,18 +6,24 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Upload, FileText } from 'lucide-react';
+import { Upload, FileText, Loader2 } from 'lucide-react';
 
 export function CsvImportDialog() {
   const [open, setOpen] = useState(false);
   const [csvText, setCsvText] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const { importCsv } = useDashboardStore();
 
   const handleImport = async () => {
-    if (!csvText.trim()) return;
-    await importCsv(csvText);
-    setCsvText('');
-    setOpen(false);
+    if (!csvText.trim() || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await importCsv(csvText);
+      setCsvText('');
+      setOpen(false);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -58,8 +64,16 @@ export function CsvImportDialog() {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} className="border-slate-700 text-slate-300">Cancel</Button>
-          <Button onClick={handleImport} disabled={!csvText.trim()} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-            <FileText className="w-3.5 h-3.5 mr-1" />Import
+          <Button onClick={handleImport} disabled={!csvText.trim() || isSubmitting} className="bg-emerald-600 hover:bg-emerald-700 text-white">
+            {isSubmitting ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />Importing...
+              </>
+            ) : (
+              <>
+                <FileText className="w-3.5 h-3.5 mr-1" />Import
+              </>
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>

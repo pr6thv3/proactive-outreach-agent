@@ -18,7 +18,7 @@ import { AgentMemoryService } from '../agents/infrastructure/agent-memory';
 import { AutonomousWorkflowEngine } from '../agents/infrastructure/autonomous-engine';
 import { JobQueue } from '../agents/infrastructure/job-queue';
 import { selectBestChannel, type Channel } from '../agents/infrastructure/multi-channel';
-import { logger, generateTraceId } from '../agents/infrastructure/observability';
+import { logger, generateTraceId, recordAgentEvent } from '../agents/infrastructure/observability';
 import { trackEdit, feedEditToMemory, updateEditOutcome } from '../agents/act/edit-tracker';
 import { buildEvidenceSnapshot } from '../agents/think/evidence';
 import { db } from '@/lib/db';
@@ -103,11 +103,27 @@ export class Orchestrator {
 
     const finalContext = await this.buildContext(leadId, undefined, context.organizationId, traceId);
     const finalSignals = finalContext?.signals || combinedSignals;
+    const durationMs = (scrapeResult.durationMs || 0) + (extractResult.durationMs || 0);
+
+    await recordAgentEvent({
+      organizationId: context.organizationId,
+      leadId,
+      agentName: 'Orchestrator',
+      stepName: 'observe_pipeline',
+      phase: 'observe',
+      level: 'info',
+      message: `Observe pipeline completed: ${finalSignals.length} signals discovered`,
+      inputData: { leadId, urls },
+      outputData: { signalCount: finalSignals.length, enrichedLead },
+      status: 'completed',
+      traceId,
+      durationMs,
+    }).catch(() => {});
 
     return {
       success: scrapeResult.success || extractResult.success,
       data: { signals: finalSignals, enrichedLead, scrapeResults: [...(scrapeResult.data?.scrapeResults || []), ...(extractResult.data?.scrapeResults || [])] },
-      durationMs: (scrapeResult.durationMs || 0) + (extractResult.durationMs || 0),
+      durationMs,
       agentName: 'ObservePipeline', phase: 'observe', traceId,
     };
   }
@@ -310,10 +326,28 @@ export class Orchestrator {
       },
     });
 
+    const thinkDuration = (reasoningResult.durationMs || 0) + (pitchResult.durationMs || 0) + (personalResult.durationMs || 0);
+
+    await recordAgentEvent({
+      organizationId: context.organizationId,
+      leadId,
+      campaignId,
+      agentName: 'Orchestrator',
+      stepName: 'think_pipeline',
+      phase: 'think',
+      level: 'info',
+      message: `Think pipeline completed: generated copy for strategy ${selectedStrategy}`,
+      inputData: { leadId, campaignId, objective, selectedStrategy },
+      outputData: enrichedStrategy,
+      status: 'completed',
+      traceId,
+      durationMs: thinkDuration,
+    }).catch(() => {});
+
     return {
       success: true,
       data: enrichedStrategy,
-      durationMs: (reasoningResult.durationMs || 0) + (pitchResult.durationMs || 0) + (personalResult.durationMs || 0),
+      durationMs: thinkDuration,
       agentName: 'ThinkPipeline', phase: 'think', traceId,
     };
   }
@@ -389,17 +423,64 @@ export class Orchestrator {
       include: { lead: true },
     });
     if (!msg) return { success: false, data: null as unknown as ActOutput, error: 'Message not found', durationMs: 0, agentName: 'EmailSender', phase: 'act' };
-    if (msg.status !== 'approved') return { success: false, data: null as unknown as ActOutput, error: `Message must be "approved", got "${msg.status}"`, durationMs: 0, agentName: 'EmailSender', phase: 'act' };
+    if (msg.status !== 'approved' && msg.status !== 'sending') {
+      return { success: false, data: null as unknown as ActOutput, error: `Message must be "approved", got "${msg.status}"`, durationMs: 0, agentName: 'EmailSender', phase: 'act' };
+    }
+
+    // Atomic CAS claiming if not already claimed by caller
+    if (msg.status === 'approved') {
+      const updated = await db.outreachMessage.updateMany({
+        where: { id: messageId, status: 'approved' },
+        data: { status: 'sending' },
+      });
+      if (updated.count === 0) {
+        return { success: false, data: null as unknown as ActOutput, error: 'Message already claimed or not in approved state', durationMs: 0, agentName: 'EmailSender', phase: 'act' };
+      }
+    }
 
     const context = await this.buildContext(msg.leadId, msg.campaignId || undefined, organizationId || msg.organizationId || undefined, traceId);
     if (!context) return this.leadNotFound('EmailSender');
 
-    return emailSender.run({
-      message: {
-        id: msg.id, subject: msg.subject, body: msg.body, channel: msg.channel as MessageData['channel'], status: msg.status as MessageData['status'], strategy: msg.strategy || undefined, angle: msg.angle || undefined, tone: msg.tone || undefined, cta: msg.cta || undefined, sequencePos: msg.sequencePos, campaignId: msg.campaignId || undefined, evidenceSnapshot: msg.evidenceSnapshot,
-      },
-      dryRun,
-    }, context);
+    try {
+      const result = await emailSender.run({
+        message: {
+          id: msg.id, subject: msg.subject, body: msg.body, channel: msg.channel as MessageData['channel'], status: msg.status as MessageData['status'], strategy: msg.strategy || undefined, angle: msg.angle || undefined, tone: msg.tone || undefined, cta: msg.cta || undefined, sequencePos: msg.sequencePos, campaignId: msg.campaignId || undefined, evidenceSnapshot: msg.evidenceSnapshot,
+        },
+        dryRun,
+      }, context);
+
+      if (!result.success) {
+        await db.outreachMessage.updateMany({
+          where: { id: messageId, status: 'sending' },
+          data: { status: 'failed' },
+        });
+      }
+
+      await recordAgentEvent({
+        organizationId: context.organizationId,
+        leadId: msg.leadId,
+        campaignId: msg.campaignId || undefined,
+        agentName: 'Orchestrator',
+        stepName: 'act_pipeline',
+        phase: 'act',
+        level: result.success ? 'info' : 'error',
+        message: result.success ? `Outreach message dispatched: ${messageId}` : `Dispatch failed: ${result.error}`,
+        inputData: { messageId, dryRun },
+        outputData: result.data,
+        status: result.success ? 'completed' : 'failed',
+        error: result.error,
+        traceId: context.traceId,
+        durationMs: result.durationMs,
+      }).catch(() => {});
+
+      return result;
+    } catch (error) {
+      await db.outreachMessage.updateMany({
+        where: { id: messageId, status: 'sending' },
+        data: { status: 'approved' },
+      });
+      throw error;
+    }
   }
 
   // ─── RE-EVAL Phase (Enhanced with Memory Learning) ───
@@ -410,6 +491,22 @@ export class Orchestrator {
     if (!context) return this.leadNotFound('ReEvalPipeline');
 
     const result = await replyClassifier.run({ messageId, replyText }, context);
+
+    await recordAgentEvent({
+      organizationId: context.organizationId,
+      leadId,
+      agentName: 'Orchestrator',
+      stepName: 'reeval_pipeline',
+      phase: 'reeval',
+      level: result.success ? 'info' : 'error',
+      message: result.success ? `Reply classified as ${result.data?.category}` : `Reeval failed: ${result.error}`,
+      inputData: { leadId, messageId, replyText },
+      outputData: result.data,
+      status: result.success ? 'completed' : 'failed',
+      error: result.error,
+      traceId,
+      durationMs: result.durationMs,
+    }).catch(() => {});
 
     // Learn from the outcome (THE COMPOUNDING STEP)
     if (result.success && this.config.enableMemoryLearning) {
@@ -540,6 +637,7 @@ export class Orchestrator {
     state.currentPhase = 'reeval';
     state.status = state.errors.length > 0 ? 'failed' : 'completed';
     state.completedAt = new Date();
+    const durationMs = state.completedAt ? state.completedAt.getTime() - state.startedAt.getTime() : 0;
 
     // Log pipeline run
     await db.pipelineRun.create({
@@ -548,7 +646,7 @@ export class Orchestrator {
         status: state.status,
         organizationId: lead?.organizationId,
         leadId,
-        durationMs: state.completedAt ? state.completedAt.getTime() - state.startedAt.getTime() : 0,
+        durationMs,
         traceId,
         output: JSON.stringify({
           scores: state.scores,
@@ -557,6 +655,26 @@ export class Orchestrator {
         }),
       },
     });
+
+    await recordAgentEvent({
+      organizationId: lead?.organizationId,
+      leadId,
+      campaignId: options?.campaignId,
+      agentName: 'Orchestrator',
+      stepName: 'full_pipeline',
+      phase: 'full_pipeline',
+      level: state.status === 'completed' ? 'info' : 'warn',
+      message: `Full pipeline completed with status ${state.status}`,
+      inputData: { leadId, options },
+      outputData: {
+        scores: state.scores,
+        signalIntelligence: state.signalIntelligence,
+        errors: state.errors,
+      },
+      status: state.status,
+      traceId,
+      durationMs,
+    }).catch(() => {});
 
     return state;
   }

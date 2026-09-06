@@ -75,12 +75,12 @@ export async function calculateReputation(domainId: string, organizationId?: str
   else if (score >= 30) level = 'poor';
   else level = 'critical';
 
-  // Should we pause sending?
-  const shouldPause = bounceRate > 0.10 || complaintRate > 0.01;
-  const pauseReason = bounceRate > 0.10
-    ? `Bounce rate critically high: ${(bounceRate * 100).toFixed(1)}% (threshold: 10%)`
-    : complaintRate > 0.01
-      ? `Complaint rate critically high: ${(complaintRate * 100).toFixed(2)}% (threshold: 1%)`
+  // Should we pause sending? (Circuit breaker thresholds: bounce rate >= 3.0%, complaint rate >= 0.10%)
+  const shouldPause = bounceRate >= 0.03 || complaintRate >= 0.001;
+  const pauseReason = bounceRate >= 0.03
+    ? `Bounce rate critically high: ${(bounceRate * 100).toFixed(1)}% (threshold: 3.0%)`
+    : complaintRate >= 0.001
+      ? `Complaint rate critically high: ${(complaintRate * 100).toFixed(2)}% (threshold: 0.10%)`
       : undefined;
 
   // Recommendation

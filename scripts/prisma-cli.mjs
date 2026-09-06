@@ -41,7 +41,9 @@ if (sqlite) {
     let content = fs.readFileSync(pgSchemaPath, 'utf8');
     content = content.replace('provider = "postgresql"', 'provider = "sqlite"');
     content = content.replace('url      = env("DATABASE_URL")', 'url      = env("SQLITE_DATABASE_URL")');
+    content = content.replace(/\s+directUrl\s*=\s*env\("DIRECT_URL"\)/g, '');
     content = content.replace(/\s+embedding\s+Unsupported\("vector"\)\?/g, '');
+    content = content.replace(/(\w+)\s+String\[\](\s+@default\([^)]*\))?/g, '$1 String @default("[]")');
     fs.writeFileSync(sqliteSchemaPath, content, 'utf8');
   }
 }

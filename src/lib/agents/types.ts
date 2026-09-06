@@ -13,7 +13,8 @@ export type LeadStatus =
   | 'replied'
   | 'interested'
   | 'negative'
-  | 'unsubscribed';
+  | 'unsubscribed'
+  | (string & {});
 
 export type SignalType =
   | 'pain_point'
@@ -52,13 +53,17 @@ export type MessageStatus =
 
 export type ReplyCategory =
   | 'interested'
+  | 'meeting_request'
+  | 'question'
+  | 'not_interested'
+  | 'out_of_office'
+  | 'unsubscribe'
   | 'neutral'
   | 'negative'
-  | 'unsubscribe'
   | 'needs_info'
-  | 'out_of_office';
+  | 'ooo';
 
-export type FollowUpType = 'reminder' | 'value_add' | 'check_in' | 'last_attempt';
+export type FollowUpType = 'reminder' | 'value_add' | 'check_in' | 'last_attempt' | 'bump' | 'case_study' | 'breakup';
 
 export type FollowUpSchedule = 'T+3' | 'T+7' | 'T+14';
 
@@ -107,6 +112,7 @@ export interface AgentContext {
 
 export interface LeadData {
   id: string;
+  organizationId?: string;
   name: string;
   email: string;
   company?: string;
@@ -341,7 +347,20 @@ export interface ReEvalOutput {
   category: ReplyCategory;
   confidence: number;
   reasoning: string;
-  nextAction: 'escalate' | 'auto_reply' | 'schedule_followup' | 'mark_unsub' | 'stop_sequence' | 'no_action';
+  nextAction:
+    | 'escalate'
+    | 'auto_reply'
+    | 'schedule_followup'
+    | 'mark_unsub'
+    | 'stop_sequence'
+    | 'no_action'
+    | 'snooze_sequence'
+    | 'book_meeting';
+  calendarLink?: string;
+  suggestedReply?: string;
+  returnDate?: Date | string;
+  suppressed?: boolean;
+  sentiment?: 'very_positive' | 'positive' | 'neutral' | 'negative' | 'hostile';
 }
 
 // ─── Lead Ingestion Result ────────────────────────────

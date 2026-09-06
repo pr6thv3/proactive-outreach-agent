@@ -1,10 +1,12 @@
-import { Campaign, Lead, OutreachMessage, SenderAccount, SendingDomain } from '@prisma/client';
+import { Campaign, Lead, OutreachEmail as OutreachMessage, SendingDomain } from '@prisma/client';
+type SenderAccount = any;
 import { db } from '@/lib/db';
 import { isOnDncList, validateEmail } from '@/lib/safety';
 import { canSendMore } from '@/lib/deliverability/warmup-manager';
 import { shouldPauseSending } from '@/lib/deliverability/reputation-tracker';
 import { getJobHealth, type JobHealth } from '@/lib/queue/health';
 import { evaluateRisk } from '@/lib/risk';
+import { isInSendWindow } from '@/lib/deliverability/send-cadence';
 
 export type ReadinessStatus = 'pass' | 'warn' | 'block';
 
@@ -99,6 +101,8 @@ export async function evaluateSendReadiness(params: {
   organizationId: string;
   messageId: string;
   traceId: string;
+  enforceSendWindow?: boolean;
+  minLeadScore?: number;
 }): Promise<SendReadinessResult> {
   const checks: SendReadinessCheck[] = [];
   const addCheck = (check: Omit<SendReadinessCheck, 'statusLabel'>) => {
@@ -141,24 +145,184 @@ export async function evaluateSendReadiness(params: {
       label: 'Message exists',
       status: 'block',
       reason: 'Message was not found in this workspace.',
+      remediationTarget: 'approval_queue',
     });
     addQueueChecks(addCheck, queueSummary);
     return finalize(params.traceId, checks, { queue: queueSummary });
   }
 
+  const sender = await resolveSender(params.organizationId, message);
+  const domain = sender?.domain || null;
+  const lead = message.lead;
+  const campaign = message.campaign;
+
+  // ═══════════════════════════════════════════════════════════
+  // PRE-SEND GUARDS 6-GATE SEQUENCE (STRICT ORDER)
+  // 1. autonomy_paused
+  // 2. daily_limit_reached
+  // 3. email_not_verified
+  // 4. lead_opted_out
+  // 5. outside_send_window
+  // 6. score_below_threshold
+  // ═══════════════════════════════════════════════════════════
+
+  // Gate 1: autonomy_paused
+  const userPref = await db.userPreference.findFirst({
+    where: {
+      OR: [
+        { activeOrgId: params.organizationId, autonomyPaused: true },
+        { organization: { id: params.organizationId }, autonomyPaused: true },
+      ],
+    },
+  });
+  const isAutonomyPaused = Boolean(userPref?.autonomyPaused);
   addCheck({
-    id: 'message_approved',
-    label: 'Message approved',
-    status: message.status === 'approved' ? 'pass' : 'block',
-    reason: message.status === 'approved'
-      ? 'Message has been approved by a human.'
-      : `Message must be approved before sending; current status is ${message.status}.`,
-    remediationTarget: message.status === 'approved' ? undefined : 'approval_queue',
+    id: 'autonomy_paused',
+    label: 'Autonomy status active',
+    status: isAutonomyPaused ? 'block' : 'pass',
+    reason: isAutonomyPaused
+      ? 'Outreach paused: Autonomy killswitch is active for this workspace.'
+      : 'Autonomy is active.',
+    remediationTarget: isAutonomyPaused ? 'autonomy_panel' : undefined,
   });
 
-  const lead = message.lead;
+  // Gate 2: daily_limit_reached
+  const today = new Date().toISOString().split('T')[0];
+  const isDateToday = (d: any) => d instanceof Date ? d.toISOString().split('T')[0] === today : String(d || '').startsWith(today);
+
+  const campaignSentToday = (campaign && isDateToday(campaign.dailySendsDate)) ? (campaign.dailySendsCount ?? 0) : 0;
+  const campaignLimitReached = campaign ? campaignSentToday >= (campaign.maxDailySends ?? 50) : false;
+
+  const senderSentToday = (sender && isDateToday(sender.sentTodayDate || sender.dailySendsDate)) ? (sender.sentToday || sender.dailySendsCount || 0) : 0;
+  const senderLimitReached = sender ? senderSentToday >= (sender.dailyLimit ?? 50) : false;
+
+  const domainSentToday = (domain && isDateToday(domain.dailySendsDate)) ? (domain.dailySendsCount ?? 0) : 0;
+  const domainLimitReached = domain ? domainSentToday >= (domain.dailyLimit ?? 50) : false;
+
+  const dailySendLimit = userPref?.dailySendLimit ?? 50;
+  let workspaceSendsToday = 0;
+  try {
+    const { getDailySendCount } = await import('@/lib/redis');
+    workspaceSendsToday = await getDailySendCount(params.organizationId);
+  } catch {
+    workspaceSendsToday = 0;
+  }
+  const workspaceLimitReached = workspaceSendsToday >= dailySendLimit;
+
+  const isDailyLimitReached = campaignLimitReached || senderLimitReached || domainLimitReached || workspaceLimitReached;
+  addCheck({
+    id: 'daily_limit_reached',
+    label: 'Daily sending limit available',
+    status: isDailyLimitReached ? 'block' : 'pass',
+    reason: isDailyLimitReached
+      ? `Daily sending limit reached (${
+          campaignLimitReached ? `Campaign: ${campaignSentToday}/${campaign?.maxDailySends}` :
+          domainLimitReached ? `Domain: ${domainSentToday}/${domain?.dailyLimit}` :
+          senderLimitReached ? `Sender: ${senderSentToday}/${sender?.dailyLimit}` :
+          `Workspace: ${workspaceSendsToday}/${dailySendLimit}`
+        }).`
+      : 'Daily sending limits available.',
+    remediationTarget: isDailyLimitReached ? 'deliverability' : undefined,
+  });
+
+  // Gate 3: email_not_verified
+  const emailCheck = lead ? validateEmail(lead.email) : { valid: false, reason: 'No lead or email provided' };
+  let isEmailVerified = false;
+  if (lead && emailCheck.valid) {
+    if (lead.emailVerified === true || lead.status === 'enriched' || lead.status === 'approved') {
+      isEmailVerified = true;
+    } else {
+      const verifiedQueueItem = await db.enrichmentQueue.findFirst({
+        where: {
+          leadId: lead.id,
+          status: { in: ['MX_VERIFIED', 'ENRICHED', 'SKIPPED'] },
+        },
+      });
+      if (verifiedQueueItem) isEmailVerified = true;
+    }
+  }
+
+  addCheck({
+    id: 'email_not_verified',
+    label: 'Email address verified',
+    status: isEmailVerified ? 'pass' : 'block',
+    reason: isEmailVerified
+      ? 'Lead email address passed MX/enrichment verification.'
+      : lead
+        ? (!emailCheck.valid ? `Invalid email address: ${emailCheck.reason}` : 'Lead email address has not passed MX/enrichment verification.')
+        : 'Lead was not found for this message.',
+    remediationTarget: isEmailVerified ? undefined : 'lead_record',
+  });
+
+  // Gate 4: lead_opted_out
+  let isLeadOptedOut = false;
   if (!lead) {
-    addCheck({ id: 'lead_exists', label: 'Lead exists', status: 'block', reason: 'Lead was not found for this message.' });
+    isLeadOptedOut = true;
+  } else {
+    const onDnc = await isOnDncList(lead.email, params.organizationId);
+    isLeadOptedOut = Boolean(lead.isBlacklisted || lead.doNotContact || lead.status === 'unsubscribed' || onDnc);
+  }
+
+  addCheck({
+    id: 'lead_opted_out',
+    label: 'Lead opted out / DNC suppression',
+    status: isLeadOptedOut ? 'block' : 'pass',
+    reason: isLeadOptedOut
+      ? 'Lead is suppressed: recipient has opted out, is blacklisted, or is on workspace DNC list.'
+      : 'Lead has not opted out.',
+    remediationTarget: isLeadOptedOut ? 'dnc_list' : undefined,
+  });
+
+  // Gate 5: outside_send_window
+  const inSendWindow = isInSendWindow((lead as any)?.timezone || undefined);
+  const isApprovedMsg = message.status === 'approved';
+  // Strictly block outside send window for QUEUED emails or when enforceSendWindow is explicitly requested
+  const isBlockedByWindow = !inSendWindow && (!isApprovedMsg || (params as any).enforceSendWindow === true);
+
+  addCheck({
+    id: 'outside_send_window',
+    label: 'Sending window active',
+    status: isBlockedByWindow ? 'block' : 'pass',
+    reason: isBlockedByWindow
+      ? 'Current time is outside the optimal sending window (business hours).'
+      : inSendWindow
+        ? 'Current time is within the active sending window.'
+        : 'Message has human approval; send window restriction waived.',
+    remediationTarget: isBlockedByWindow ? 'campaign_settings' : undefined,
+  });
+
+  // Gate 6: score_below_threshold
+  const leadScore = lead?.score ?? (lead as any)?.leadScore ?? 0;
+  const minThreshold = (params as any).minLeadScore ?? campaign?.autonomyMinScore ?? userPref?.minLeadScore ?? (isApprovedMsg ? 0 : 50.0);
+  const isBelowScoreThreshold = !isApprovedMsg && (leadScore < minThreshold);
+
+  addCheck({
+    id: 'score_below_threshold',
+    label: 'Lead score qualification threshold',
+    status: isBelowScoreThreshold ? 'block' : 'pass',
+    reason: isBelowScoreThreshold
+      ? `Lead score (${leadScore}) is below qualification threshold (${minThreshold}).`
+      : `Lead score (${leadScore}) meets minimum threshold (${minThreshold}).`,
+    remediationTarget: isBelowScoreThreshold ? 'lead_record' : undefined,
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // DISPATCH STATUS HARMONIZATION & DELIVERABILITY DEFENSE
+  // ═══════════════════════════════════════════════════════════
+
+  const isSendableStatus = ['approved', 'QUEUED', 'queued', 'sending'].includes(message.status);
+  addCheck({
+    id: 'message_approved',
+    label: 'Message approved / queued',
+    status: isSendableStatus ? 'pass' : 'block',
+    reason: isSendableStatus
+      ? `Message is in sendable status: ${message.status}.`
+      : `Message must be approved or queued before sending; current status is ${message.status}.`,
+    remediationTarget: isSendableStatus ? undefined : 'approval_queue',
+  });
+
+  if (!lead) {
+    addCheck({ id: 'lead_exists', label: 'Lead exists', status: 'block', reason: 'Lead was not found for this message.', remediationTarget: 'lead_record' });
   } else {
     addCheck({
       id: 'lead_not_blacklisted',
@@ -189,7 +353,6 @@ export async function evaluateSendReadiness(params: {
       reason: lead.status === 'unsubscribed' ? 'Lead has unsubscribed.' : 'Lead has not unsubscribed.',
       remediationTarget: lead.status === 'unsubscribed' ? 'lead_record' : undefined,
     });
-    const emailCheck = validateEmail(lead.email);
     addCheck({
       id: 'valid_email',
       label: 'Email address is valid',
@@ -199,7 +362,6 @@ export async function evaluateSendReadiness(params: {
     });
   }
 
-  const campaign = message.campaign;
   if (campaign) {
     const inactive = ['paused', 'archived', 'completed'].includes(campaign.status);
     addCheck({
@@ -211,16 +373,14 @@ export async function evaluateSendReadiness(params: {
         : `Campaign status is ${campaign.status}.`,
       remediationTarget: inactive ? 'campaign_settings' : undefined,
     });
-    const today = new Date().toISOString().split('T')[0];
-    const campaignSentToday = campaign.dailySendsDate === today ? campaign.dailySendsCount : 0;
     addCheck({
       id: 'campaign_daily_limit',
       label: 'Campaign daily limit available',
-      status: campaignSentToday >= campaign.maxDailySends ? 'block' : 'pass',
-      reason: campaignSentToday >= campaign.maxDailySends
+      status: campaignSentToday >= (campaign.maxDailySends ?? 50) ? 'block' : 'pass',
+      reason: campaignSentToday >= (campaign.maxDailySends ?? 50)
         ? `Campaign daily limit reached (${campaignSentToday}/${campaign.maxDailySends}).`
-        : `Campaign has ${campaign.maxDailySends - campaignSentToday} sends remaining today.`,
-      remediationTarget: campaignSentToday >= campaign.maxDailySends ? 'campaign_settings' : undefined,
+        : `Campaign has ${(campaign.maxDailySends ?? 50) - campaignSentToday} sends remaining today.`,
+      remediationTarget: campaignSentToday >= (campaign.maxDailySends ?? 50) ? 'campaign_settings' : undefined,
     });
   } else {
     addCheck({
@@ -230,9 +390,6 @@ export async function evaluateSendReadiness(params: {
       reason: 'No campaign is attached; campaign limits do not apply.',
     });
   }
-
-  const sender = await resolveSender(params.organizationId, message);
-  const domain = sender?.domain || null;
 
   addCheck({
     id: 'sender_exists',
@@ -252,7 +409,8 @@ export async function evaluateSendReadiness(params: {
     });
 
     const today = new Date().toISOString().split('T')[0];
-    const sentToday = sender.sentTodayDate === today ? sender.sentToday : 0;
+    const isDateToday = (d: any) => d instanceof Date ? d.toISOString().split('T')[0] === today : String(d || '').startsWith(today);
+    const sentToday = isDateToday(sender.sentTodayDate) ? sender.sentToday : 0;
     addCheck({
       id: 'sender_daily_limit',
       label: 'Sender daily limit available',
@@ -275,18 +433,20 @@ export async function evaluateSendReadiness(params: {
   });
 
   if (domain) {
+    const isDomainVerified = domain.status === 'verified' || domain.status === 'active';
     addCheck({
       id: 'domain_verified',
       label: 'Domain verified',
-      status: domain.status === 'verified' ? 'pass' : 'block',
-      reason: domain.status === 'verified' ? 'Domain is verified.' : `Sending domain is not verified: ${domain.status}.`,
-      remediationTarget: domain.status === 'verified' ? undefined : 'deliverability',
+      status: isDomainVerified ? 'pass' : 'block',
+      reason: isDomainVerified ? 'Domain is verified.' : `Sending domain is not verified: ${domain.status}.`,
+      remediationTarget: isDomainVerified ? undefined : 'deliverability',
     });
 
     addReputationCheck(addCheck, 'domain_reputation', 'Domain reputation healthy', domain.reputationScore, 'domain');
 
     const today = new Date().toISOString().split('T')[0];
-    const domainSentToday = domain.dailySendsDate === today ? domain.dailySendsCount : 0;
+    const isDateToday = (d: any) => d instanceof Date ? d.toISOString().split('T')[0] === today : String(d || '').startsWith(today);
+    const domainSentToday = isDateToday(domain.dailySendsDate) ? (domain.dailySendsCount ?? 0) : 0;
     addCheck({
       id: 'domain_daily_limit',
       label: 'Domain daily limit available',
@@ -375,6 +535,9 @@ export async function assertReadyToSend(params: {
   organizationId: string;
   messageId: string;
   traceId: string;
+  enforceSendWindow?: boolean;
+  minLeadScore?: number;
+  claim?: boolean;
 }): Promise<{
   readiness: SendReadinessResult;
   lead: Lead;
@@ -387,6 +550,26 @@ export async function assertReadyToSend(params: {
   if (!readiness.ready) {
     const blocked = readiness.checks.filter(check => check.status === 'block').map(check => check.reason).join('; ');
     throw new Error(blocked || 'Send readiness failed');
+  }
+
+  // Atomic Compare-And-Swap (CAS) claim if requested
+  if (params.claim) {
+    const claimRes = await db.outreachMessage.updateMany({
+      where: {
+        id: params.messageId,
+        organizationId: params.organizationId,
+        status: { in: ['approved', 'QUEUED', 'queued'] },
+      },
+      data: { status: 'sending' },
+    });
+    if (claimRes.count === 0) {
+      const current = await db.outreachMessage.findFirst({
+        where: { id: params.messageId, organizationId: params.organizationId },
+      });
+      if (current?.status !== 'sending') {
+        throw new Error(`Message ${params.messageId} already claimed or not in sendable state (status: ${current?.status})`);
+      }
+    }
   }
 
   const message = await db.outreachMessage.findFirst({
@@ -412,6 +595,51 @@ export async function assertReadyToSend(params: {
     message,
     sender,
     domain,
+  };
+}
+
+/**
+ * Helper to check the 6 pre-send guards in strict sequence:
+ * (1) autonomy_paused, (2) daily_limit_reached, (3) email_not_verified,
+ * (4) lead_opted_out, (5) outside_send_window, (6) score_below_threshold
+ */
+export async function checkPreSendGuards(params: {
+  organizationId: string;
+  messageId: string;
+  traceId?: string;
+  enforceSendWindow?: boolean;
+  minLeadScore?: number;
+}): Promise<{
+  passed: boolean;
+  blockedGate?: string;
+  reason?: string;
+  checks: SendReadinessCheck[];
+}> {
+  const readiness = await evaluateSendReadiness({
+    organizationId: params.organizationId,
+    messageId: params.messageId,
+    traceId: params.traceId || `guard_${Date.now()}`,
+    enforceSendWindow: params.enforceSendWindow,
+    minLeadScore: params.minLeadScore,
+  });
+
+  const coreGateIds = [
+    'autonomy_paused',
+    'daily_limit_reached',
+    'email_not_verified',
+    'lead_opted_out',
+    'outside_send_window',
+    'score_below_threshold',
+  ];
+
+  const coreChecks = readiness.checks.filter(c => coreGateIds.includes(c.id));
+  const blockedCheck = coreChecks.find(c => c.status === 'block');
+
+  return {
+    passed: !blockedCheck,
+    blockedGate: blockedCheck?.id,
+    reason: blockedCheck?.reason,
+    checks: coreChecks,
   };
 }
 
@@ -547,8 +775,8 @@ function toCampaignSummary(campaign: Campaign): CampaignSummary {
     id: campaign.id,
     name: campaign.name,
     status: campaign.status,
-    maxDailySends: campaign.maxDailySends,
-    dailySendsCount: campaign.dailySendsCount,
+    maxDailySends: campaign.maxDailySends ?? 50,
+    dailySendsCount: campaign.dailySendsCount ?? 0,
   };
 }
 
@@ -578,8 +806,8 @@ function toDomainSummary(domain: SendingDomain): DomainSummary {
     domain: domain.domain,
     status: domain.status,
     dailyLimit: domain.dailyLimit,
-    dailySendsCount: domain.dailySendsCount,
-    reputationScore: domain.reputationScore,
+    dailySendsCount: domain.dailySendsCount ?? 0,
+    reputationScore: domain.reputationScore ?? 90,
     spfVerified: domain.spfVerified,
     dkimVerified: domain.dkimVerified,
     dmarcVerified: domain.dmarcVerified,

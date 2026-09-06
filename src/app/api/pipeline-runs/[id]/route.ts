@@ -3,10 +3,10 @@ import { db } from '@/lib/db';
 import { requireWorkspace } from '@/lib/auth/context';
 import { createTraceId, fail, handleApiError, ok } from '@/lib/api/responses';
 
-export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const traceId = createTraceId();
   try {
-    const context = await requireWorkspace();
+    const context = await requireWorkspace(request);
     const { id } = await params;
     const run = await db.pipelineRun.findFirst({
       where: { id, organizationId: context.organizationId },

@@ -6,7 +6,7 @@ import { db } from '@/lib/db';
 import { AgentMemoryService } from '@/lib/agents/infrastructure/agent-memory';
 import { logger } from '@/lib/agents/infrastructure/observability';
 
-export type EditType = 'subject_changed' | 'body_changed' | 'cta_changed' | 'hook_changed' | 'full_rewrite' | 'minor_edit' | 'deletion';
+export type EditType = 'no_change' | 'subject_changed' | 'body_changed' | 'cta_changed' | 'hook_changed' | 'full_rewrite' | 'minor_edit' | 'deletion';
 
 export interface TrackEditParams {
   messageId: string;
@@ -34,6 +34,18 @@ export interface EditAnalysis {
  * Analyze the difference between original and edited text
  */
 export function analyzeEdit(original: string, edited: string): EditAnalysis {
+  if (original === edited) {
+    return {
+      editType: 'no_change',
+      changeMagnitude: 0,
+      addedWords: 0,
+      removedWords: 0,
+      keptPhrases: extractPhrases(original, 4),
+      removedPhrases: [],
+      addedPhrases: [],
+    };
+  }
+
   if (!original || !edited) {
     return {
       editType: edited ? 'full_rewrite' : 'deletion',
@@ -67,7 +79,9 @@ export function analyzeEdit(original: string, edited: string): EditAnalysis {
 
   // Classify edit type
   let editType: EditType;
-  if (changeMagnitude < 0.1) {
+  if (changeMagnitude === 0) {
+    editType = 'no_change';
+  } else if (changeMagnitude < 0.1) {
     editType = 'minor_edit';
   } else if (changeMagnitude > 0.8) {
     editType = 'full_rewrite';

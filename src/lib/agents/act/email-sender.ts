@@ -47,9 +47,9 @@ export class EmailSenderAgent extends BaseAgent<EmailSenderInput, ActOutput> {
       }
     }
 
-    // 3. Verify message is in "approved" status
+    // 3. Verify message is in "approved" or "sending" status
     const existingMsg = await db.outreachMessage.findUnique({ where: { id: message.id } });
-    if (existingMsg && existingMsg.status !== 'approved') {
+    if (existingMsg && existingMsg.status !== 'approved' && existingMsg.status !== 'sending') {
       return { messageId: message.id, channel: 'email', crmLogged: false, followUpsScheduled: [] };
     }
 

@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.agents
+.env*.local
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev.db*
+*.db
+*.db-journal
+test-results
+coverage

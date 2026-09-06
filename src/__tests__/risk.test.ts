@@ -7,7 +7,9 @@ const db = dbClient as any;
 import { checkCircuitBreaker } from '../lib/risk/circuit-breaker';
 import { evaluateRisk } from '../lib/risk/index';
 import { evaluateSendReadiness } from '../lib/deliverability/send-readiness';
-import { Lead, Campaign, OutreachMessage, SendingDomain, SenderAccount, CampaignSenderPool } from '@prisma/client';
+import { Lead, Campaign, OutreachEmail as OutreachMessage, SendingDomain } from '@prisma/client';
+type SenderAccount = any;
+type CampaignSenderPool = any;
 
 let passed = 0;
 let failed = 0;
@@ -81,18 +83,11 @@ const mockDomain = (overrides?: Partial<SendingDomain>): SendingDomain => ({
   dmarcStatus: 'verified',
   dmarcVerified: true,
   warmupEnabled: false,
-  warmupStatus: 'completed',
   warmupDay: 30,
   warmupDailyLimit: 250,
   dailyLimit: 250,
   dailySendsCount: 0,
   dailySendsDate: null,
-  totalSent: 100,
-  totalDelivered: 100,
-  totalBounced: 0,
-  totalComplained: 0,
-  totalOpened: 50,
-  totalClicked: 10,
   bounceRate: 0,
   complaintRate: 0,
   openRate: 0.5,
@@ -108,7 +103,7 @@ const mockDomain = (overrides?: Partial<SendingDomain>): SendingDomain => ({
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
-});
+}) as unknown as SendingDomain;
 
 const mockCampaign = (overrides?: Partial<Campaign>): Campaign => ({
   id: 'campaign_123',
@@ -132,15 +127,6 @@ const mockCampaign = (overrides?: Partial<Campaign>): Campaign => ({
   twitterEnabled: false,
   smsEnabled: false,
   contactFormEnabled: false,
-  linkedinMessageTemplate: null,
-  twitterDmTemplate: null,
-  smsTemplate: null,
-  contactFormTemplate: null,
-  autonomyEnabled: false,
-  autonomyMinScore: 60,
-  autonomyMaxDailyActions: 20,
-  autonomyActionsToday: 0,
-  autonomyLastActionDate: null,
   autoApprovalEnabled: false,
   spamRiskThreshold: 0.25,
   bounceRatePauseThreshold: 0.03,
@@ -150,7 +136,7 @@ const mockCampaign = (overrides?: Partial<Campaign>): Campaign => ({
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
-});
+} as Campaign);
 
 const mockLead = (overrides?: Partial<Lead>): Lead => ({
   id: 'lead_123',
@@ -167,20 +153,16 @@ const mockLead = (overrides?: Partial<Lead>): Lead => ({
   isBlacklisted: false,
   doNotContact: false,
   lastContacted: null,
-  notes: null,
   leadScore: 80,
   signalScore: 80,
   replyProb: 0.4,
   conversionProb: 0.2,
   spamRisk: 0.05,
   priorityTier: 'hot',
-  nextActionAt: null,
-  autonomyEnabled: false,
-  lastAutonomousRun: null,
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
-});
+}) as unknown as Lead;
 
 const mockMessage = (overrides?: Partial<OutreachMessage>): OutreachMessage => ({
   id: 'msg_123',
@@ -220,7 +202,7 @@ const mockMessage = (overrides?: Partial<OutreachMessage>): OutreachMessage => (
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
-});
+}) as unknown as OutreachMessage;
 
 const mockSender = (overrides?: Partial<SenderAccount>): SenderAccount => ({
   id: 'sender_123',
@@ -344,7 +326,7 @@ async function runTests() {
     // Case 1: Daily quota reached
     db.lead.findFirst = async () => mockLead();
     db.outreachMessage.findFirst = async () => mockMessage();
-    db.campaign.findFirst = async () => mockCampaign({ dailySendsCount: 50, maxDailySends: 50, dailySendsDate: new Date().toISOString().split('T')[0] });
+    db.campaign.findFirst = async () => mockCampaign({ dailySendsCount: 50, maxDailySends: 50, dailySendsDate: new Date().toISOString().split('T')[0] as any });
     db.emailEvent.count = async () => 0;
 
     risk = await evaluateRisk({ domainId: 'domain_123', campaignId: 'campaign_123', organizationId: 'org_123', leadId: 'lead_123', messageId: 'msg_123' });
@@ -352,7 +334,7 @@ async function runTests() {
     assert(risk.checks.pacingAndBudget.reason?.includes('daily budget limit reached') || false, 'Pacing reason should mention daily limit');
 
     // Case 2: Pacing warning (hourly limit exceeded)
-    db.campaign.findFirst = async () => mockCampaign({ dailySendsCount: 5, maxDailySends: 80, dailySendsDate: new Date().toISOString().split('T')[0] });
+    db.campaign.findFirst = async () => mockCampaign({ dailySendsCount: 5, maxDailySends: 80, dailySendsDate: new Date().toISOString().split('T')[0] as any });
     db.emailEvent.count = async (args: any) => {
       // Return 20 sends in the last hour
       if (args.where.createdAt) return 20; // Pacing limit is Math.max(10, 80/8) = 10

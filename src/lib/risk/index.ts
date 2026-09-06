@@ -110,7 +110,8 @@ export async function evaluateRisk(params: RiskEvaluationParams): Promise<RiskAs
 
   if (campaign) {
     const today = new Date().toISOString().split('T')[0];
-    dailySendsCount = campaign.dailySendsDate === today ? campaign.dailySendsCount : 0;
+    const isDateToday = (d: any) => d instanceof Date ? d.toISOString().split('T')[0] === today : String(d || '').startsWith(today);
+    dailySendsCount = isDateToday(campaign.dailySendsDate) ? (campaign.dailySendsCount ?? 0) : 0;
     maxDailySends = campaign.maxDailySends;
 
     // Check hourly pacing: fetch sends in the last 1 hour
@@ -181,25 +182,26 @@ export async function evaluateRisk(params: RiskEvaluationParams): Promise<RiskAs
   });
   unhealthySendersCount = uniqueUnhealthySenderIds.size;
 
+  const isDomainHealthy = (domain: any) => {
+    if (!domain) return true;
+    const status = String(domain.status || '').toLowerCase();
+    const isVerified = status === 'verified' || status === 'active';
+    const repScore = typeof domain.reputationScore === 'number' ? domain.reputationScore : 90;
+    return isVerified && repScore >= 30;
+  };
+
   const isCurrentSenderUnhealthy = currentSender && (
     currentSender.status !== 'active' ||
-    !currentSender.domain ||
-    currentSender.domain.status !== 'verified' ||
-    currentSender.reputationScore < 30 ||
-    currentSender.domain.reputationScore < 30
+    !isDomainHealthy(currentSender.domain) ||
+    (typeof currentSender.reputationScore === 'number' && currentSender.reputationScore < 30)
   );
 
   if (isCurrentSenderUnhealthy) {
     // Current sender is unhealthy, check if we can suggest a healthy sender in the pool
     const healthyPoolSenders = poolSenders.filter(p => {
       const s = p.sender;
-      if (!s || s.status !== 'active' || s.reputationScore < 30) return false;
-      // If domain info is available, check it; otherwise treat sender as healthy
-      // (domain check is done separately at the domain level)
-      if (s.domain) {
-        return s.domain.status === 'verified' && s.domain.reputationScore >= 30;
-      }
-      return true;
+      if (!s || s.status !== 'active' || (typeof s.reputationScore === 'number' && s.reputationScore < 30)) return false;
+      return isDomainHealthy(s.domain);
     });
 
     if (healthyPoolSenders.length > 0) {
@@ -209,7 +211,7 @@ export async function evaluateRisk(params: RiskEvaluationParams): Promise<RiskAs
         const scoreB = (b.sender?.reputationScore ?? 0) + (b.sender?.domain?.reputationScore ?? 0);
         return scoreB - scoreA;
       });
-      suggestedSenderId = sortedHealthy[0].sender?.id;
+      suggestedSenderId = sortedHealthy[0].sender?.id || sortedHealthy[0].senderId;
       
       poolCheckStatus = 'warn';
       compositeScore += 15;

@@ -32,10 +32,23 @@ export async function GET(request: NextRequest) {
     if (event === 'opened') {
       await handleTrackedOpen(messageId);
     } else if (event === 'clicked' && url) {
-      await handleTrackedClick(messageId, url);
+      // Validate the url parameter against allowed protocols (http/https) and sanitize
+      let sanitizedUrl: string | null = null;
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          sanitizedUrl = parsed.toString();
+        }
+      } catch {
+        sanitizedUrl = null;
+      }
 
-      // Redirect to the original URL
-      return NextResponse.redirect(url, 302);
+      if (sanitizedUrl) {
+        await handleTrackedClick(messageId, sanitizedUrl);
+
+        // Redirect to the sanitized target URL
+        return NextResponse.redirect(sanitizedUrl, 302);
+      }
     }
   } catch (error) {
     if (process.env.NODE_ENV !== 'production') console.error('Tracking error:', error);

@@ -23,10 +23,11 @@ function section(title: string) {
 }
 
 section('Auth and API Boundary');
-const proxy = read('src/proxy.ts');
-assert(proxy.includes('clerkMiddleware'), 'Next proxy uses Clerk middleware');
-assert(proxy.includes('/api/webhooks(.*)'), 'Webhook routes are excluded from interactive auth');
-assert(!fs.existsSync(path.join(process.cwd(), 'src/middleware.ts')), 'Deprecated middleware.ts is not used');
+const middlewarePath = fs.existsSync(path.join(process.cwd(), 'src/proxy.ts')) ? 'src/proxy.ts' : 'src/middleware.ts';
+const middleware = read(middlewarePath);
+assert(middleware.includes('getToken'), 'NextAuth session token middleware/proxy active');
+assert(middleware.includes('/api/webhooks'), 'Webhook routes are excluded from interactive auth');
+assert(fs.existsSync(path.join(process.cwd(), middlewarePath)), 'NextAuth proxy.ts / middleware.ts is active');
 
 const orchestrate = read('src/app/api/orchestrate/route.ts');
 assert(orchestrate.includes('z.union'), 'Orchestrate route uses Zod action validation');
@@ -51,15 +52,14 @@ section('Tenant Isolation');
 const schema = read('prisma/schema.prisma');
 for (const model of [
   'Organization',
-  'WorkspaceMember',
+  'OrganizationMember',
   'Lead',
   'Campaign',
-  'OutreachMessage',
+  'OutreachEmail',
   'DoNotContact',
   'AgentMemory',
   'JobQueue',
   'SendingDomain',
-  'SenderAccount',
 ]) {
   assert(schema.includes(`model ${model}`), `Schema includes ${model}`);
 }
