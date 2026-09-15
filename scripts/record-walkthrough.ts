@@ -347,7 +347,8 @@ async function main() {
     console.log('🎬 ═════════════════════════════════════════════════════════════');
 
     await context.close();
-    const rawVideoPath = await page.video().path();
+    const video = page.video();
+    const rawVideoPath = video ? await video.path() : '';
     console.log(`📹 Raw WebM recording saved to: ${rawVideoPath}`);
 
     await browser.close();
@@ -380,8 +381,8 @@ async function main() {
         fs.copyFileSync(OUTPUT_MP4, BRAIN_MP4_PARENT);
         console.log(`✅ Copied to parent brain dir: ${BRAIN_MP4_PARENT}`);
       }
-    } catch (e) {
-      console.log(`Parent brain dir not directly writable: ${e.message}`);
+    } catch (e: any) {
+      console.log(`Parent brain dir not directly writable: ${e?.message}`);
     }
 
     // Verify video properties

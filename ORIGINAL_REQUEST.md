@@ -358,3 +358,77 @@ Implement concrete fixes for the highest-priority friction points discovered in 
 <ADDITIONAL_METADATA>
 The current local time is: 2026-09-06T12:44:54+05:30.
 </ADDITIONAL_METADATA>
+
+## 2026-09-15T14:52:23Z
+
+<USER_REQUEST>
+# Teamwork Project Prompt — Launched
+
+> Status: Launched 🚀
+> Goal: ProactiveReach Industry-Ready Transformation
+> Requested team: Full Team
+
+Transform the existing ProactiveReach system from a functional AI outbound prototype into a reliable, trustworthy, low-friction, commercially deployable product that real businesses can adopt and continue using without developer intervention.
+
+Working directory: /home/pr6thv3/.gemini/antigravity/scratch/proactive-outreach-agent
+Integrity mode: development
+
+## Requirements
+
+### R1. Deterministic Policy Layer & Progressive Autonomy Engine
+- Implement an explicit policy-gated execution pipeline: `Task Understanding → Context/Rules → Execution Plan → Policy Validation → Tool Execution → Result Validation → Risk Evaluation → Approval if required → Commit Action → Audit Event`.
+- Enforce programmatic progressive autonomy levels (Level 0: Draft, Level 1: Assisted, Level 2: Supervised, Level 3: Autonomous) enforced strictly by code, never by the LLM itself.
+- Redesign the review queue into a confidence-graded deck (Approve, Edit, Reject, Regenerate, Approve Similar) with transparent "Why Selected" evidence and risk indicators.
+
+### R2. Durable Execution State Machine & Idempotent Failure Recovery
+- Replace implicit/volatile states with explicit workflow states (`CREATED`, `UNDERSTANDING`, `PLANNED`, `VALIDATING`, `WAITING_APPROVAL`, `EXECUTING`, `RETRYING`, `PARTIAL`, `COMPLETED`, `FAILED`, `CANCELLED`, `ROLLED_BACK`, `QUARANTINED`).
+- Enforce durable idempotency keys across all external side-effects (Resend email dispatches, DNC list updates, campaign state mutations, webhook processing).
+- Implement centralized failure classification (`INVALID_INPUT`, `AUTH_FAILURE`, `PERMISSION_DENIED`, `RATE_LIMITED`, `NETWORK_FAILURE`, `PROVIDER_FAILURE`, `MODEL_FAILURE`, `VALIDATION_FAILURE`, `POLICY_BLOCK`, `DUPLICATE`, `TIMEOUT`, `UNKNOWN_FAILURE`) with bounded, jittered exponential backoffs.
+
+### R3. Webhook Hardening & Multi-Category Inbound Reply Triage
+- Audit and harden all webhook handlers with cryptographic signature verification (Svix HMAC-SHA256), timestamp replay protection, and dead-letter queue isolation.
+- Upgrade reply classification from basic 6-category intent to a layered taxonomy (`POSITIVE`, `NEGATIVE`, `QUESTION`, `MEETING_REQUEST`, `UNSUBSCRIBE`, `OUT_OF_OFFICE`, `BOUNCE`, `AUTO_REPLY`, `REFERRAL`, `FORWARD`, `UNCLEAR`, `SECURITY_WARNING`, `LEGAL_REQUEST`, `PRIVACY_REQUEST`).
+- Route uncertain or low-confidence replies to human escalation tasks with 1-click actions rather than failing silently.
+
+### R4. CRM Integration Connector Abstraction & System Observability
+- Implement a pluggable `CRMAdapter` interface (`HubSpot`, `Salesforce`, `Pipedrive`, `Generic REST`) supporting contact sync, activity logging, reply/meeting logging, deduplication, and webhook synchronization.
+- Build an operational Incident Center answering *"What is broken right now?"* with root cause diagnostics, what was tried, what is blocked, and guided remediation steps.
+- Implement an immutable audit log viewer and client-facing ROI Dashboard displaying actual measured hours saved, automation costs, and net ROI.
+
+### R5. Comprehensive Production Verification & Safety Gates
+- Maintain 100% build health: `npm run typecheck` (0 errors), `npm run lint` (0 errors), Next.js standalone compilation.
+- Execute full test matrix: Unit tests, integration tests, E2E client journey simulation, chaos/failure tests (network drop, Redis outage, DB drop, duplicate webhook, concurrent workers), and load benchmarks.
+
+---
+
+## Acceptance Criteria
+
+### Execution & Autonomy Safety
+- [ ] Every external mutation passes through programmatic policy validation before execution
+- [ ] Autonomy level is strictly enforced by code; unauthorized autonomous actions throw permission errors
+- [ ] Review queue provides batch approval for high-confidence items and preserves inline human edits
+
+### Resilience & Idempotency
+- [ ] Repeated dispatches with identical idempotency keys result in exact-once send execution
+- [ ] Interrupted or killed worker jobs resume cleanly from persisted state machine checkpoints
+- [ ] Failure classifier correctly maps transient errors to bounded retry and permanent errors to quarantine
+
+### Inbound Reply & Webhook Integrity
+- [ ] Invalid webhook signatures or replayed timestamps are rejected with HTTP 401/400
+- [ ] Layered 14-category taxonomy categorizes edge-case inbound emails with fallback to human review
+- [ ] Opt-out / unsubscribe signals trigger immediate, irreversible workspace-wide DNC suppression
+
+### CRM & Operational Observability
+- [ ] Pluggable CRMAdapter synchronizes leads, events, and booked meetings
+- [ ] Incident Center surfaces active failures with plain-English causes and 1-click remediation
+- [ ] Audit log records every critical system transition with actor, timestamp, previous state, and reason
+
+### Code & Test Standards
+- [ ] `npm run typecheck` passes with 0 errors
+- [ ] `npm run lint` passes with 0 errors
+- [ ] All unit, integration, and chaos test suites pass 100% green
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-15T20:22:23+05:30.
+</ADDITIONAL_METADATA>
+

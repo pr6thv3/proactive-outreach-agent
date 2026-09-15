@@ -25,6 +25,7 @@
     "test:concurrency": "cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/concurrency-load.test.ts",
     "test:circuit-breaker": "cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/circuit-breaker-killswitch.test.ts",
     "test:hardening": "npm run test && npm run test:m1 && npm run test:m4 && npm run test:admin && npm run test:staging && npm run test:failure-qa && npm run test:domain-qa && npm run test:beta && npm run test:adversarial && npm run test:concurrency && npm run test:circuit-breaker && cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/e2e-suite.test.ts",
+    "test:industry": "cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/r1-policy-autonomy.test.ts && cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/r2-workflow-state-machine.test.ts && cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/r3-layered-reply-classifier.test.ts && cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/r4-crm-observability.test.ts && cross-env SQLITE_DATABASE_URL=file:./dev.db AUTH_DEV_BYPASS=true tsx src/__tests__/e2e-r1-r5-matrix.test.ts",
     "smoke": "tsx src/__tests__/smoke.test.ts",
     "db:push": "node scripts/prisma-cli.mjs db push",
     "db:generate": "node scripts/prisma-cli.mjs generate",

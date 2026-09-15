@@ -70,6 +70,13 @@ enum WebhookStatus {
   INACTIVE
 }
 
+enum AutonomyLevel {
+  LEVEL_0_DRAFT
+  LEVEL_1_ASSISTED
+  LEVEL_2_SUPERVISED
+  LEVEL_3_AUTONOMOUS
+}
+
 // ─── MULTI-TENANCY ROOT ──────────────────────────────────
 model Organization {
   id                 String             @id @default(cuid())
@@ -155,6 +162,7 @@ model UserPreference {
   onboardingComplete Boolean      @default(false)
   autonomyEnabled    Boolean      @default(true)
   autonomyPaused     Boolean      @default(false)
+  autonomyLevel      AutonomyLevel @default(LEVEL_1_ASSISTED)
   minLeadScore       Float        @default(60.0)
   dailySendLimit     Int          @default(50)
   pausedReason       String?
@@ -304,6 +312,7 @@ model Campaign {
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name           String
   status         String         @default("DRAFT")
+  autonomyLevel  AutonomyLevel  @default(LEVEL_1_ASSISTED)
   sequenceSteps  Json?
   fromEmail      String?
   fromName       String?

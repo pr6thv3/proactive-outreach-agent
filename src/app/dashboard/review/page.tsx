@@ -1,6 +1,6 @@
 'use client';
 
-import { ReviewQueue } from '@/components/dashboard/review-queue';
+import { ReviewDeck } from '@/components/dashboard/review-deck';
 import { Keyboard, Sparkles } from 'lucide-react';
 
 export default function ReviewPage() {
@@ -10,10 +10,10 @@ export default function ReviewPage() {
         <div>
           <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Sparkles className="h-6 w-6 text-blue-400" />
-            AI Outreach Review Queue
+            AI Outreach Review Deck
           </h2>
           <p className="text-slate-400 text-sm mt-0.5">
-            High-velocity 5-second review for AI-researched prospects before dispatch, or switch to 100% Autopilot.
+            Confidence-graded review deck with instant &ldquo;Approve Similar&rdquo; cluster batching, grounding citations, and deterministic risk indicators.
           </p>
         </div>
 
@@ -35,7 +35,7 @@ export default function ReviewPage() {
         </div>
       </div>
 
-      <ReviewQueue />
+      <ReviewDeck />
     </div>
   );
 }
