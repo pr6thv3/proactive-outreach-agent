@@ -9,6 +9,8 @@ import { db } from '@/lib/db';
 import { addToDncList } from '@/lib/safety';
 import { interruptSequence, snoozeSequence } from '../act/followup-scheduler';
 import { addDays } from 'date-fns';
+import { triageInboundReply } from '@/lib/policy/multi-intent-triage';
+import { CanonicalIntent, RiskFlag } from '@/lib/policy/reply-precedence';
 
 export interface ReplyClassifierInput {
   messageId: string;
@@ -20,6 +22,12 @@ export interface ClassifyReplyResult extends ReEvalOutput {
   suggestedReply?: string;
   returnDate?: string;
   suppressed: boolean;
+  primary_intent?: CanonicalIntent;
+  secondary_intents?: CanonicalIntent[];
+  risk_flags?: RiskFlag[];
+  policy_version?: string;
+  selected_policy?: string;
+  required_action?: string;
 }
 
 export class ReplyClassifierAgent extends BaseAgent<ReplyClassifierInput, ReEvalOutput> {
@@ -424,7 +432,13 @@ export function classifyByRules(replyText: string, leadName = 'Prospect', compan
   };
 }
 
-async function saveClassification(messageId: string, result: ReEvalOutput, replyText: string, organizationId?: string) {
+async function saveClassification(
+  messageId: string,
+  result: ReEvalOutput,
+  replyText: string,
+  organizationId?: string,
+  metadata?: Record<string, unknown>
+) {
   await db.replyClassification.create({
     data: {
       organizationId,
@@ -434,6 +448,7 @@ async function saveClassification(messageId: string, result: ReEvalOutput, reply
       reasoning: result.reasoning,
       replyText,
       nextAction: result.nextAction,
+      metadata: metadata ? (metadata as any) : undefined,
     },
   });
   await db.outreachMessage.updateMany({
@@ -660,9 +675,33 @@ export async function classifyReply(params: {
   }
 
   const rawResult = classifyByRules(replyText, leadName, companyName);
+  const triage = triageInboundReply(replyText);
+
+  // If multi-intent triage detects statutory privacy or legal threats, enforce precedence
+  if (triage.primary_intent === 'PRIVACY_REQUEST' || triage.primary_intent === 'LEGAL_REQUEST') {
+    rawResult.category = 'unsubscribe';
+    rawResult.confidence = triage.confidence;
+    rawResult.reasoning = triage.reasoning;
+    rawResult.nextAction = 'mark_unsub';
+  } else if (triage.primary_intent === 'UNSUBSCRIBE') {
+    rawResult.category = 'unsubscribe';
+    rawResult.confidence = triage.confidence;
+    rawResult.nextAction = 'mark_unsub';
+  }
+
+  const triageMetadata = {
+    primary_intent: triage.primary_intent,
+    secondary_intents: triage.secondary_intents,
+    risk_flags: triage.risk_flags,
+    policy_version: triage.policy_version,
+    selected_policy: triage.selected_policy,
+    required_action: triage.required_action,
+    extractedReferralEmail: triage.extractedReferralEmail,
+    returnDate: triage.returnDate,
+  };
 
   if (resolvedMessageId) {
-    await saveClassification(resolvedMessageId, rawResult, replyText, organizationId);
+    await saveClassification(resolvedMessageId, rawResult, replyText, organizationId, triageMetadata);
   }
 
   if (resolvedLeadId) {
@@ -675,5 +714,11 @@ export async function classifyReply(params: {
     calendarLink: rawResult.calendarLink || (rawResult.category === 'meeting_request' || rawResult.category === 'interested' ? 'https://cal.com/alex/15min' : undefined),
     suggestedReply: rawResult.suggestedReply || generateSuggestedReply(rawResult.category, replyText, leadName, companyName),
     returnDate: rawResult.returnDate ? (rawResult.returnDate instanceof Date ? rawResult.returnDate.toISOString() : String(rawResult.returnDate)) : undefined,
+    primary_intent: triage.primary_intent,
+    secondary_intents: triage.secondary_intents,
+    risk_flags: triage.risk_flags,
+    policy_version: triage.policy_version,
+    selected_policy: triage.selected_policy,
+    required_action: triage.required_action,
   };
 }

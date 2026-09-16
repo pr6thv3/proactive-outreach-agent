@@ -5,6 +5,7 @@ import { requireRole } from '@/lib/auth/context';
 import { createTraceId, fail, handleApiError, ok } from '@/lib/api/responses';
 import { DeliverabilityService } from '@/lib/deliverability';
 import { EnrichmentStatus, OutreachEmailStatus, EmailGeneratedBy } from '@prisma/client';
+import { isWorkspaceEmergencyStopped } from '@/lib/safety/emergency-stop';
 
 const SendEmailSchema = z.object({
   subject: z.string().min(1),
@@ -16,6 +17,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const traceId = createTraceId();
   try {
     const context = await requireRole('MEMBER', request);
+
+    // ═══ WORKSPACE EMERGENCY STOP GUARD (R7) ═══
+    const isStopped = await isWorkspaceEmergencyStopped(context.organizationId);
+    if (isStopped) {
+      return fail(
+        'Outbound email delivery blocked: Workspace Emergency Stop is active.',
+        423,
+        'emergency_stop_active',
+        traceId
+      );
+    }
+
     const { id: leadId } = await params;
     const body = await request.json();
     const { subject, body: emailBody, campaignId } = SendEmailSchema.parse(body);

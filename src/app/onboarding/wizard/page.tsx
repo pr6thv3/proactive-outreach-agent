@@ -31,6 +31,7 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import type { IcpCriteriaData, PersonaData, SequenceStepData, GoalTranslationResult } from '@/lib/agents/think/goal-translator';
+import { HumanAutonomyMode, mapAutonomyLevelToMode } from '@/lib/policy/autonomy-mode';
 
 const EXAMPLE_GOALS = [
   'Find US fintechs with 50-500 employees hiring cybersecurity leaders and reach out to CTOs',
@@ -135,6 +136,7 @@ export default function OnboardingWizardPage() {
   const [dailySendLimit, setDailySendLimit] = useState(50);
   const [minLeadScore, setMinLeadScore] = useState(60);
   const [autonomyEnabled, setAutonomyEnabled] = useState(true);
+  const [autonomyMode, setAutonomyMode] = useState<HumanAutonomyMode>('Review Everything');
   const [campaignName, setCampaignName] = useState('Q1 Growth Outreach Campaign');
 
   // Load existing state on mount
@@ -154,6 +156,11 @@ export default function OnboardingWizardPage() {
               if (data.preference.minLeadScore) setMinLeadScore(data.preference.minLeadScore);
               if (typeof data.preference.autonomyEnabled === 'boolean') {
                 setAutonomyEnabled(data.preference.autonomyEnabled);
+              }
+              if (data.preference.autonomyLevel !== undefined) {
+                setAutonomyMode(mapAutonomyLevelToMode(data.preference.autonomyLevel));
+              } else if (data.preference.autonomyMode) {
+                setAutonomyMode(mapAutonomyLevelToMode(data.preference.autonomyMode));
               }
             }
             if (data.icp) {
@@ -324,6 +331,7 @@ export default function OnboardingWizardPage() {
             dailySendLimit: Number(dailySendLimit),
             minLeadScore: Number(minLeadScore),
             autonomyEnabled,
+            autonomyMode,
             campaignName: campaignName || 'Autonomous Launch Campaign',
             goal: goalPrompt,
             targetAudience: `${targetIndustries.join(', ')} (${companySizeMin}-${companySizeMax} emp)`,
@@ -761,6 +769,42 @@ export default function OnboardingWizardPage() {
           {/* ═══════════════════════════════════════════════════════════════════ */}
           {step === 3 && (
             <div className="space-y-5">
+              {/* 1-Click Sandbox Domain Fallback */}
+              <div className="rounded-xl border border-blue-900/60 bg-gradient-to-r from-blue-950/40 via-slate-950 to-indigo-950/30 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-blue-400" />
+                    <span className="text-xs font-bold text-blue-200">Evaluating without a custom sending domain?</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 max-w-md">
+                    Skip DNS registrar configuration and launch outreach immediately using an isolated pre-verified sandbox domain.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setDomain('outreach.sandbox-demo.io');
+                    setSenderName('Alex Vance');
+                    setSenderEmail('alex@outreach.sandbox-demo.io');
+                    toast.success('Instant Sandbox Domain activated! Zero DNS setup required.');
+                  }}
+                  className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shrink-0 shadow-sm"
+                >
+                  <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                  Use Instant Sandbox Domain
+                </Button>
+              </div>
+
+              {domain === 'outreach.sandbox-demo.io' && (
+                <div className="p-3 rounded-lg border border-emerald-800/80 bg-emerald-950/20 text-emerald-300 text-xs flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+                  <span>
+                    <strong>Instant Sandbox Domain Active:</strong> Pre-verified SPF, DKIM, and DMARC credentials are loaded. All outreach is safely isolated for pilot testing.
+                  </span>
+                </div>
+              )}
+
               <div className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="domain" className="text-xs font-semibold uppercase tracking-wider text-slate-300">
@@ -885,22 +929,96 @@ export default function OnboardingWizardPage() {
                 </div>
               </div>
 
-              {/* Autopilot Switch */}
-              <div className="rounded-xl border border-blue-900/40 bg-blue-950/20 p-4 flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Zap className="h-4 w-4 text-blue-400" />
-                    <span className="font-bold text-sm text-slate-100">Activate Autonomous AI SDR Autopilot</span>
-                  </div>
-                  <p className="text-xs text-slate-400 max-w-md">
-                    Enables the agent to autonomously discover qualified prospects, research signals, generate grounded copy, and prepare outreach.
+              {/* Human Autonomy Operating Mode Selection (3 Rich Cards) */}
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                    Human Autonomy Operating Mode
+                  </Label>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Choose how much authority the agent has to dispatch emails without operator intervention.
                   </p>
                 </div>
-                <Switch
-                  checked={autonomyEnabled}
-                  onCheckedChange={setAutonomyEnabled}
-                  className="data-[state=checked]:bg-blue-600"
-                />
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {/* Card 1: Review Everything */}
+                  <div
+                    onClick={() => setAutonomyMode('Review Everything')}
+                    className={`cursor-pointer rounded-xl border p-4 transition-all duration-200 flex flex-col justify-between ${
+                      autonomyMode === 'Review Everything'
+                        ? 'border-blue-500 bg-blue-950/40 shadow-lg shadow-blue-950/50 ring-2 ring-blue-500'
+                        : 'border-slate-800 bg-slate-950 hover:border-slate-700 hover:bg-slate-900/60'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-sm text-slate-100">Review Everything</span>
+                        <Badge variant="secondary" className="text-[10px] bg-blue-950 text-blue-300 border-blue-800">
+                          Recommended Day 1
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        100% human sign-off. AI discovers, enriches, and drafts, but never sends without your explicit approval.
+                      </p>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                      <span className="text-slate-400">Boundary:</span>
+                      <span className="font-semibold text-blue-400">0 auto-sends</span>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Review Exceptions */}
+                  <div
+                    onClick={() => setAutonomyMode('Review Exceptions')}
+                    className={`cursor-pointer rounded-xl border p-4 transition-all duration-200 flex flex-col justify-between ${
+                      autonomyMode === 'Review Exceptions'
+                        ? 'border-emerald-500 bg-emerald-950/30 shadow-lg shadow-emerald-950/40 ring-2 ring-emerald-500'
+                        : 'border-slate-800 bg-slate-950 hover:border-slate-700 hover:bg-slate-900/60'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-sm text-slate-100">Review Exceptions</span>
+                        <Badge variant="outline" className="text-[10px] border-emerald-700 text-emerald-300">
+                          Supervised
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        High-confidence leads (score ≥ 85, spam risk ≤ 10%) dispatch automatically. Ambiguous leads route to Exception Queue.
+                      </p>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                      <span className="text-slate-400">Boundary:</span>
+                      <span className="font-semibold text-emerald-400">Score ≥ 85 auto-approved</span>
+                    </div>
+                  </div>
+
+                  {/* Card 3: Auto-Run */}
+                  <div
+                    onClick={() => setAutonomyMode('Auto-Run')}
+                    className={`cursor-pointer rounded-xl border p-4 transition-all duration-200 flex flex-col justify-between ${
+                      autonomyMode === 'Auto-Run'
+                        ? 'border-purple-500 bg-purple-950/30 shadow-lg shadow-purple-950/40 ring-2 ring-purple-500'
+                        : 'border-slate-800 bg-slate-950 hover:border-slate-700 hover:bg-slate-900/60'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-sm text-slate-100">Auto-Run</span>
+                        <Badge variant="outline" className="text-[10px] border-purple-700 text-purple-300">
+                          Full Autopilot
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        Continuous autonomous operation within daily quota caps and deliverability circuit breakers.
+                      </p>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                      <span className="text-slate-400">Boundary:</span>
+                      <span className="font-semibold text-purple-400">Score ≥ 60 auto-approved</span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* Strategy Summary Card */}

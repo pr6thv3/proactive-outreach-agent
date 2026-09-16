@@ -12,6 +12,7 @@ import { db } from '@/lib/db';
 import { isLeadSafeToContact, appendUnsubscribeFooter, checkSendingLimit } from '@/lib/safety';
 import { logger } from '@/lib/agents/infrastructure/observability';
 import { assertReadyToSend, evaluateSendReadiness, checkPreSendGuards } from '@/lib/deliverability/send-readiness';
+import { assertOutboundAllowed } from '@/lib/safety/emergency-stop';
 import type { Campaign, Lead, OutreachEmail as OutreachMessage, SendingDomain } from '@prisma/client';
 type SenderAccount = any;
 
@@ -94,6 +95,9 @@ class DeliverabilityServiceClass {
       };
     }
 
+    // ═══ LAST-DEFENSE PRE-FLIGHT EMERGENCY STOP GATE (R7) ═══
+    await assertOutboundAllowed(organizationId);
+
     // ═══ CHECK IF RESEND IS CONFIGURED ═══
     if (!isResendConfigured()) {
       // Fallback: mark as sent in DB but don't actually send
@@ -144,6 +148,9 @@ class DeliverabilityServiceClass {
         }
       }
     }
+
+    // ═══ LAST-DEFENSE PRE-FLIGHT EMERGENCY STOP GATE (R7) ═══
+    await assertOutboundAllowed(organizationId);
 
     // ═══ SEND VIA RESEND ═══
     const result = await sendEmailViaResend({

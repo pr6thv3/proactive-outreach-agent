@@ -7,6 +7,12 @@ import crypto from 'crypto';
 import { db } from '@/lib/db';
 import { DeliverabilityService } from '@/lib/deliverability';
 import { createTraceId, fail, ok } from '@/lib/api/responses';
+import { triageInboundReply } from '@/lib/policy/multi-intent-triage';
+import {
+  requiresImmediateSuppression,
+  requiresHumanEscalation,
+} from '@/lib/policy/reply-precedence';
+import { executeSeparatedSuppressionAndEscalation } from '@/lib/policy/suppression';
 
 interface InboundEmail {
   from: string;
@@ -139,6 +145,13 @@ export async function POST(request: NextRequest) {
 
     const replyText = email.text || email.html?.replace(/<[^>]+>/g, '') || '';
 
+    // Multi-intent reply triage with deterministic policy precedence v1.0.0
+    const triage = triageInboundReply(replyText, {
+      from: fromEmail,
+      subject: email.subject,
+      headers: customHeaders,
+    });
+
     // Update matching message
     if (matchingMessage) {
       await db.outreachMessage.update({
@@ -150,24 +163,79 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // Determine lead status update based on precedence
+    const isSuppressedIntent = requiresImmediateSuppression(triage.primary_intent, triage.secondary_intents);
+    const updatedLeadStatus = isSuppressedIntent
+      ? 'unsubscribed'
+      : triage.primary_intent === 'MEETING_REQUEST' || triage.primary_intent === 'POSITIVE'
+        ? 'interested'
+        : triage.primary_intent === 'NEGATIVE'
+          ? 'negative'
+          : 'replied';
+
     // Update lead status
     await db.lead.update({
       where: { id: lead.id },
-      data: { status: 'replied' },
+      data: {
+        status: updatedLeadStatus,
+        ...(isSuppressedIntent ? { doNotContact: true, isBlacklisted: true } : {}),
+      },
     });
 
-    // Create reply classification entry
+    // Create rich reply classification entry with full policy precedence metadata
     if (matchingMessage) {
       await db.replyClassification.create({
         data: {
           organizationId: orgId,
           leadId: lead.id,
           messageId: matchingMessage.id,
-          category: 'neutral',
-          confidence: 0,
+          category: triage.primary_intent.toLowerCase(),
+          confidence: triage.confidence,
+          reasoning: triage.reasoning,
           replyText: replyText.slice(0, 5000),
-          nextAction: 'no_action',
+          nextAction: triage.required_action,
+          metadata: {
+            primary_intent: triage.primary_intent,
+            secondary_intents: triage.secondary_intents,
+            risk_flags: triage.risk_flags,
+            confidence: triage.confidence,
+            required_action: triage.required_action,
+            policy_version: triage.policy_version,
+            selected_policy: triage.selected_policy,
+            extractedReferralEmail: triage.extractedReferralEmail,
+            returnDate: triage.returnDate,
+          },
         },
+      });
+    }
+
+    // Safe suppression & escalation separation: decoupled two-phase execution
+    if (isSuppressedIntent || requiresHumanEscalation(triage.primary_intent, triage.risk_flags)) {
+      await executeSeparatedSuppressionAndEscalation({
+        suppression: {
+          organizationId: orgId,
+          email: fromEmail,
+          leadId: lead.id,
+          reason: `Inbound reply triage: ${triage.primary_intent} (${triage.selected_policy})`,
+          source: 'inbound_reply_webhook',
+        },
+        escalation: requiresHumanEscalation(triage.primary_intent, triage.risk_flags) ? {
+          organizationId: orgId,
+          leadId: lead.id,
+          messageId: matchingMessage?.id,
+          type: triage.primary_intent,
+          severity: triage.primary_intent === 'SECURITY_WARNING' ? 'CRITICAL' : 'HIGH',
+          title: `Human Action Required: ${triage.primary_intent}`,
+          description: triage.reasoning,
+          payload: {
+            replyText: replyText.slice(0, 1000),
+            confidence: triage.confidence,
+            risk_flags: triage.risk_flags,
+            selected_policy: triage.selected_policy,
+            policy_version: triage.policy_version,
+            required_action: triage.required_action,
+          },
+        } : undefined,
       });
     }
 
@@ -187,18 +255,38 @@ export async function POST(request: NextRequest) {
       data: {
         organizationId: orgId,
         type: 'reply_received',
-        description: `Reply received from ${lead.name || fromEmail}: "${replyText.slice(0, 100)}..."`,
+        description: `Reply received from ${lead.name || fromEmail} [${triage.primary_intent}]: "${replyText.slice(0, 100)}..."`,
         phase: 'reeval',
         leadId: lead.id,
         metadata: JSON.stringify({
           messageId: matchingMessage?.id,
           subject: email.subject,
           replyLength: replyText.length,
+          primaryIntent: triage.primary_intent,
+          secondaryIntents: triage.secondary_intents,
+          riskFlags: triage.risk_flags,
+          selectedPolicy: triage.selected_policy,
+          policyVersion: triage.policy_version,
+          requiredAction: triage.required_action,
         }),
       },
     });
 
-    return ok({ received: true, matched: true, leadId: lead.id, organizationId: orgId }, traceId);
+    return ok({
+      received: true,
+      matched: true,
+      leadId: lead.id,
+      organizationId: orgId,
+      classification: {
+        primary_intent: triage.primary_intent,
+        secondary_intents: triage.secondary_intents,
+        risk_flags: triage.risk_flags,
+        confidence: triage.confidence,
+        required_action: triage.required_action,
+        selected_policy: triage.selected_policy,
+        policy_version: triage.policy_version,
+      },
+    }, traceId);
   } catch (error) {
     if (process.env.NODE_ENV !== 'production') console.error('[InboundEmail] Error processing inbound email:', error);
     return fail('Processing failed', 500, 'inbound_processing_error', traceId);

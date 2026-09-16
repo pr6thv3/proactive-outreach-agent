@@ -6,6 +6,7 @@ import { AgentContext, ActOutput, MessageData } from '../types';
 import { db } from '@/lib/db';
 import { isLeadSafeToContact, checkSendingLimit, incrementDailySends } from '@/lib/safety';
 import { DeliverabilityService } from '@/lib/deliverability';
+import { assertOutboundAllowed } from '@/lib/safety/emergency-stop';
 
 interface EmailSenderInput {
   message: MessageData;
@@ -27,6 +28,9 @@ export class EmailSenderAgent extends BaseAgent<EmailSenderInput, ActOutput> {
     }
 
     // ═══ SAFETY CHECKS ═══
+    // 0. Check workspace emergency stop
+    await assertOutboundAllowed(context.organizationId);
+
     // 1. Check if lead is safe to contact
     const safety = await isLeadSafeToContact(leadId, context.organizationId);
     if (!safety.safe) {
@@ -71,7 +75,7 @@ export class EmailSenderAgent extends BaseAgent<EmailSenderInput, ActOutput> {
       await db.activity.create({
         data: { organizationId: context.organizationId, type: 'email_blocked', description: `Send failed: ${result.error}`, phase: 'act', leadId },
       });
-      return { messageId: message.id, channel: 'email', crmLogged: false, followUpsScheduled: [] };
+      throw new Error(result.error || 'DeliverabilityService failed to send email');
     }
 
     // Increment campaign daily sends

@@ -1,4 +1,18 @@
 import { db } from '@/lib/db';
+import {
+  resolveCircuitBreakerThresholds,
+  setOrganizationCircuitBreakerThresholds,
+  getOrganizationCircuitBreakerThresholds,
+  DEFAULT_CIRCUIT_BREAKER_THRESHOLDS,
+  type CircuitBreakerThresholds,
+} from '@/lib/safety/circuit-breaker';
+
+export {
+  setOrganizationCircuitBreakerThresholds,
+  getOrganizationCircuitBreakerThresholds,
+  DEFAULT_CIRCUIT_BREAKER_THRESHOLDS,
+  type CircuitBreakerThresholds,
+};
 
 export interface CircuitBreakerStatus {
   triggered: boolean;
@@ -24,6 +38,7 @@ export interface CircuitBreakerStatus {
 /**
  * Checks the circuit breaker status for a given domain and optionally campaign.
  * Calculates bounce, complaint, and unsubscribe rates, comparing them to thresholds.
+ * Thresholds are resolved hierarchically: Campaign override -> Organization override -> Platform defaults.
  */
 export async function checkCircuitBreaker(params: {
   domainId: string;
@@ -32,28 +47,17 @@ export async function checkCircuitBreaker(params: {
 }): Promise<CircuitBreakerStatus> {
   const { domainId, campaignId, organizationId } = params;
 
-  // 1. Resolve thresholds (campaign-specific or defaults)
+  // 1. Resolve thresholds (hierarchical: Campaign -> Organization -> Defaults)
+  const resolved = await resolveCircuitBreakerThresholds(organizationId, campaignId);
   const thresholds = {
-    bounceRate: 0.03, // 3%
-    complaintRate: 0.001, // 0.1%
-    unsubscribeRate: 0.02, // 2%
+    bounceRate: resolved.thresholds.bounceRateThreshold,
+    complaintRate: resolved.thresholds.complaintRateThreshold,
+    unsubscribeRate: resolved.thresholds.unsubscribeRateThreshold,
   };
 
   const campaign = campaignId
     ? await db.campaign.findFirst({ where: { id: campaignId, organizationId } })
     : null;
-
-  if (campaign) {
-    if (campaign.bounceRatePauseThreshold !== null && campaign.bounceRatePauseThreshold !== undefined) {
-      thresholds.bounceRate = campaign.bounceRatePauseThreshold;
-    }
-    if (campaign.complaintRatePauseThreshold !== null && campaign.complaintRatePauseThreshold !== undefined) {
-      thresholds.complaintRate = campaign.complaintRatePauseThreshold;
-    }
-    if (campaign.unsubscribeRatePauseThreshold !== null && campaign.unsubscribeRatePauseThreshold !== undefined) {
-      thresholds.unsubscribeRate = campaign.unsubscribeRatePauseThreshold;
-    }
-  }
 
   // Warning thresholds are lower than block thresholds (2/3 of block for bounce/unsub, 1/2 for complaint)
   const warningThresholds = {

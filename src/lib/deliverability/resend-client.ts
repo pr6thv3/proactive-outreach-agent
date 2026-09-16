@@ -4,6 +4,7 @@
 import { Resend } from 'resend';
 import { db } from '@/lib/db';
 import { logger } from '@/lib/agents/infrastructure/observability';
+import { assertOutboundAllowed, EmergencyStopBlockedError } from '@/lib/safety/emergency-stop';
 
 export interface SendEmailParams {
   to: string | string[];
@@ -65,6 +66,9 @@ export function isResendConfigured(): boolean {
  */
 export async function sendEmailViaResend(params: SendEmailParams): Promise<SendEmailResult> {
   try {
+    // ═══ HARD-STOP NETWORK PRE-FLIGHT GATE (R7) ═══
+    await assertOutboundAllowed(params.organizationId);
+
     if (!isResendConfigured()) {
       return { success: false, error: 'Resend API key not configured' };
     }
@@ -136,6 +140,9 @@ export async function sendEmailViaResend(params: SendEmailParams): Promise<SendE
 
     return { success: true, providerId: data?.id };
   } catch (err) {
+    if (err instanceof EmergencyStopBlockedError || (err as any)?.code === 'EMERGENCY_STOP_ACTIVE') {
+      throw err;
+    }
     const message = err instanceof Error ? err.message : 'Unknown error sending email';
     logger.error('Resend exception', { agent: 'ResendClient', phase: 'act', metadata: { error: message } });
     return { success: false, error: message };

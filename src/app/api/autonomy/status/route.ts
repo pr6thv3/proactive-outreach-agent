@@ -3,6 +3,14 @@ import { z } from 'zod';
 import { db } from '@/lib/db';
 import { requireWorkspace } from '@/lib/auth/context';
 import { createTraceId, handleApiError, ok } from '@/lib/api/responses';
+import { AutonomyLevel } from '@/lib/policy/types';
+import { mapStringToAutonomyLevel } from '@/lib/policy/autonomy-enforcer';
+import {
+  mapAutonomyLevelToMode,
+  mapModeToAutonomyLevel,
+  mapLevelToPrisma,
+  getHumanModeDetails,
+} from '@/lib/policy/autonomy-mode';
 
 export async function GET(request: NextRequest) {
   const traceId = createTraceId();
@@ -19,6 +27,10 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    const activeLevel = pref?.autonomyLevel ?? AutonomyLevel.LEVEL_1_ASSISTED;
+    const activeMode = mapAutonomyLevelToMode(activeLevel);
+    const modeDetails = getHumanModeDetails(activeLevel);
+
     // Calculate real-time queue depths for workspace
     const [pendingEnrichment, queuedEmails, sentEmails, totalLeads, scoredLeads] = await Promise.all([
       db.lead.count({ where: { organizationId: orgId, status: 'new' } }).catch(() => 0),
@@ -31,9 +43,12 @@ export async function GET(request: NextRequest) {
     return ok({
       autonomyEnabled: pref?.autonomyEnabled ?? true,
       autonomyPaused: pref?.autonomyPaused ?? false,
+      autonomyLevel: activeLevel,
+      autonomyMode: activeMode,
+      autonomyModeDetails: modeDetails,
       minLeadScore: pref?.minLeadScore ?? 60.0,
       dailySendLimit: pref?.dailySendLimit ?? 50,
-      autoApproveThreshold: 85,
+      autoApproveThreshold: modeDetails.boundaries.autoApproveThreshold,
       pausedReason: pref?.pausedReason ?? null,
       pausedAt: pref?.pausedAt ?? null,
       activeCycleStatus: pref?.autonomyPaused ? 'paused' : (pref?.autonomyEnabled ?? true ? 'active' : 'idle'),
@@ -55,6 +70,8 @@ export async function GET(request: NextRequest) {
 const UpdateStatusSchema = z.object({
   autonomyEnabled: z.boolean().optional(),
   autonomyPaused: z.boolean().optional(),
+  autonomyMode: z.string().optional(),
+  autonomyLevel: z.union([z.nativeEnum(AutonomyLevel), z.string(), z.number()]).optional(),
   minLeadScore: z.number().min(0).max(100).optional(),
   dailySendLimit: z.number().min(1).max(5000).optional(),
   autoApproveThreshold: z.number().min(0).max(100).optional(),
@@ -78,6 +95,16 @@ export async function PATCH(request: NextRequest) {
     if (parsed.minLeadScore !== undefined) updateData.minLeadScore = parsed.minLeadScore;
     if (parsed.dailySendLimit !== undefined) updateData.dailySendLimit = parsed.dailySendLimit;
 
+    // Resolve autonomy mode / level update
+    let targetLevel: AutonomyLevel | undefined;
+    if (parsed.autonomyMode !== undefined) {
+      targetLevel = mapModeToAutonomyLevel(parsed.autonomyMode);
+      updateData.autonomyLevel = mapLevelToPrisma(targetLevel);
+    } else if (parsed.autonomyLevel !== undefined) {
+      targetLevel = mapStringToAutonomyLevel(parsed.autonomyLevel);
+      updateData.autonomyLevel = mapLevelToPrisma(targetLevel);
+    }
+
     const pref = await db.userPreference.upsert({
       where: { userId: context.userId },
       update: updateData,
@@ -86,6 +113,7 @@ export async function PATCH(request: NextRequest) {
         activeOrgId: context.organizationId,
         autonomyEnabled: parsed.autonomyEnabled ?? true,
         autonomyPaused: parsed.autonomyPaused ?? false,
+        autonomyLevel: mapLevelToPrisma(targetLevel ?? AutonomyLevel.LEVEL_1_ASSISTED),
         minLeadScore: parsed.minLeadScore ?? 60.0,
         dailySendLimit: parsed.dailySendLimit ?? 50,
         pausedReason: parsed.autonomyPaused ? (parsed.reason || 'Paused by user') : null,
@@ -93,9 +121,15 @@ export async function PATCH(request: NextRequest) {
       },
     });
 
+    const activeMode = mapAutonomyLevelToMode(pref.autonomyLevel);
+    const modeDetails = getHumanModeDetails(pref.autonomyLevel);
+
     return ok({
       autonomyEnabled: pref.autonomyEnabled,
       autonomyPaused: pref.autonomyPaused,
+      autonomyLevel: pref.autonomyLevel,
+      autonomyMode: activeMode,
+      autonomyModeDetails: modeDetails,
       minLeadScore: pref.minLeadScore,
       dailySendLimit: pref.dailySendLimit,
       pausedReason: pref.pausedReason,

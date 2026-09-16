@@ -343,9 +343,9 @@ model Campaign {
   autonomyActionsToday           Int?            @default(0)
   autoApprovalEnabled            Boolean?        @default(false)
   spamRiskThreshold              Float?          @default(0.25)
-  bounceRatePauseThreshold       Float?          @default(0.03)
-  complaintRatePauseThreshold    Float?          @default(0.001)
-  unsubscribeRatePauseThreshold  Float?          @default(0.02)
+  bounceRatePauseThreshold       Float?
+  complaintRatePauseThreshold    Float?
+  unsubscribeRatePauseThreshold  Float?
   pausedReason                   String?
 
   campaignLeads  CampaignLead[]

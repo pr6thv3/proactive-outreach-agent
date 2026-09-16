@@ -2,6 +2,7 @@ import { db } from '@/lib/db';
 import { orchestrator } from '@/lib/orchestrator';
 import { assertReadyToSend, evaluateSendReadiness } from '@/lib/deliverability/send-readiness';
 import { SendEmailJobData } from '@/lib/queue/types';
+import { assertOutboundAllowed, EmergencyStopBlockedError } from '@/lib/safety/emergency-stop';
 
 export type ProcessSendEmailInput = Partial<SendEmailJobData> & {
   messageId?: string;
@@ -52,7 +53,7 @@ export async function processSendEmailJob(data: ProcessSendEmailInput) {
     };
   }
 
-  // Concurrency Safety: Atomic Compare-And-Swap claiming (Exact-once dispatch)
+  // Concurrency Safety: Atomic Compare-And-Swap claiming (Idempotent, duplicate-safe dispatch with durable execution state)
   const updated = await db.outreachMessage.updateMany({
     where: {
       id: messageId,
@@ -66,8 +67,26 @@ export async function processSendEmailJob(data: ProcessSendEmailInput) {
   }
 
   try {
+    // Pre-flight assertion right before orchestrator execution
+    if (organizationId) {
+      await assertOutboundAllowed(organizationId);
+    }
+
     const result = await orchestrator.sendMessage(messageId, data.dryRun === true, organizationId || undefined, traceId);
     if (!result.success) {
+      if (result.error?.includes('emergency stop') || result.error?.includes('EMERGENCY_STOP')) {
+        await db.outreachMessage.updateMany({
+          where: { id: messageId, status: 'sending' },
+          data: { status: 'blocked' },
+        }).catch(() => {});
+        return {
+          ...result,
+          sent: false,
+          blocked: true,
+          reason: result.error,
+        };
+      }
+
       const msg = await db.outreachMessage.findFirst({ where: { id: messageId } }).catch(() => null);
       const currentRetries = (msg as any)?.retryCount ?? 0;
       const newRetries = currentRetries + 1;
@@ -115,6 +134,15 @@ export async function processSendEmailJob(data: ProcessSendEmailInput) {
       blocked: false,
     };
   } catch (error) {
+    if (error instanceof EmergencyStopBlockedError || (error as any)?.code === 'EMERGENCY_STOP_ACTIVE') {
+      // Rollback 'sending' claim to 'blocked' without burning retries
+      await db.outreachMessage.updateMany({
+        where: { id: messageId, status: 'sending' },
+        data: { status: 'blocked' },
+      }).catch(() => {});
+      throw error;
+    }
+
     const msg = await db.outreachMessage.findFirst({ where: { id: messageId } }).catch(() => null);
     const currentRetries = (msg as any)?.retryCount ?? 0;
     const newRetries = currentRetries + 1;

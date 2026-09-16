@@ -66,7 +66,7 @@ export async function checkRedisHealth(): Promise<RedisHealth> {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
     enableOfflineQueue: false,
-    connectTimeout: 1500,
+    connectTimeout: 200,
   });
 
   try {

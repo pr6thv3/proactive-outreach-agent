@@ -7,6 +7,7 @@ import { shouldPauseSending } from '@/lib/deliverability/reputation-tracker';
 import { getJobHealth, type JobHealth } from '@/lib/queue/health';
 import { evaluateRisk } from '@/lib/risk';
 import { isInSendWindow } from '@/lib/deliverability/send-cadence';
+import { isWorkspaceEmergencyStopped } from '@/lib/safety/emergency-stop';
 
 export type ReadinessStatus = 'pass' | 'warn' | 'block';
 
@@ -166,22 +167,27 @@ export async function evaluateSendReadiness(params: {
   // 6. score_below_threshold
   // ═══════════════════════════════════════════════════════════
 
-  // Gate 1: autonomy_paused
-  const userPref = await db.userPreference.findFirst({
-    where: {
-      OR: [
-        { activeOrgId: params.organizationId, autonomyPaused: true },
-        { organization: { id: params.organizationId }, autonomyPaused: true },
-      ],
-    },
-  });
-  const isAutonomyPaused = Boolean(userPref?.autonomyPaused);
+  // Gate 1: autonomy_paused / workspace emergency stop
+  const [userPref, emergencyStopped] = await Promise.all([
+    db.userPreference.findFirst({
+      where: {
+        OR: [
+          { activeOrgId: params.organizationId, autonomyPaused: true },
+          { organization: { id: params.organizationId }, autonomyPaused: true },
+        ],
+      },
+    }).catch(() => null),
+    isWorkspaceEmergencyStopped(params.organizationId).catch(() => false),
+  ]);
+  const isAutonomyPaused = Boolean(userPref?.autonomyPaused) || emergencyStopped;
   addCheck({
     id: 'autonomy_paused',
     label: 'Autonomy status active',
     status: isAutonomyPaused ? 'block' : 'pass',
     reason: isAutonomyPaused
-      ? 'Outreach paused: Autonomy killswitch is active for this workspace.'
+      ? (emergencyStopped
+          ? 'Outreach paused: Workspace Emergency Stop is active.'
+          : 'Outreach paused: Autonomy killswitch is active for this workspace.')
       : 'Autonomy is active.',
     remediationTarget: isAutonomyPaused ? 'autonomy_panel' : undefined,
   });

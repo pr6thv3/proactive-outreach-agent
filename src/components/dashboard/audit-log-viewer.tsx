@@ -28,8 +28,11 @@ export function AuditLogViewer() {
     <Card className="border-slate-800 bg-slate-900 text-slate-100">
       <CardHeader className="pb-3">
         <CardTitle className="text-lg font-bold flex items-center gap-2">
-          <Shield className="h-5 w-5 text-blue-400" /> Immutable Security Audit Ledger
+          <Shield className="h-5 w-5 text-blue-400" /> Append-Only Audit Log (Cryptographically Verified)
         </CardTitle>
+        <p className="text-xs text-slate-400">
+          Cryptographically chained hash ledger tracking all state mutations. Administrator & migration boundaries apply.
+        </p>
       </CardHeader>
       <CardContent className="space-y-3">
         {logs.map((log) => (

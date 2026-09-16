@@ -22,6 +22,7 @@ import { processSendEmailJob } from '@/lib/queue/processors/send-email.processor
 import { processFollowupJob } from '@/lib/queue/processors/followup.processor';
 import { processAutonomousCycleJob } from '@/lib/queue/processors/autonomous-cycle.processor';
 import { processWebhookProcessingJob } from '@/lib/queue/processors/webhook-processing.processor';
+import { isWorkspaceEmergencyStopped, EmergencyStopBlockedError } from '@/lib/safety/emergency-stop';
 
 type Processor = (data: OutreachJobData) => Promise<unknown>;
 
@@ -74,13 +75,26 @@ export function createWorkers(): Worker<OutreachJobData>[] {
   });
 }
 
-async function runTrackedProcessor(queueName: QueueName, job: Job<OutreachJobData>) {
+export async function runTrackedProcessor(queueName: QueueName, job: Job<OutreachJobData>) {
+  // ═══ WORKSPACE EMERGENCY STOP CHECK (R7) ═══
+  const orgId = (job.data as any)?.organizationId;
+  const outboundQueues: QueueName[] = ['send-email', 'followup', 'autonomous-cycle'];
+
+  if (orgId && outboundQueues.includes(queueName)) {
+    const isStopped = await isWorkspaceEmergencyStopped(orgId);
+    if (isStopped) {
+      throw new EmergencyStopBlockedError(
+        orgId,
+        `Outbound queue '${queueName}' blocked by active workspace emergency stop`
+      );
+    }
+  }
+
   const jobId = job.data.jobRecordId || String(job.id);
   await db.jobQueue.updateMany({
     where: { id: jobId },
     data: {
       status: 'running',
-      attempt: job.attemptsMade + 1,
       retryCount: job.attemptsMade,
       startedAt: new Date(),
     },

@@ -1,6 +1,6 @@
 // ─── WORKFLOW IDEMPOTENCY ENGINE ─────────────────────────────────
-// Enforces exact-once execution semantics across external side-effects
-// for Milestone 2 (R2).
+// Enforces Idempotent, duplicate-safe dispatch with durable execution state
+// across external side-effects for Milestone 2 (R2).
 // ─────────────────────────────────────────────────────────────────
 
 import crypto from 'crypto';

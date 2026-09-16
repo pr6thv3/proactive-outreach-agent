@@ -6,6 +6,7 @@ import { createTraceId, handleApiError, ok, badRequest } from '@/lib/api/respons
 import { classifyReply, generateSuggestedReply } from '@/lib/agents/reeval/reply-classifier';
 import { interruptSequence, snoozeSequence } from '@/lib/agents/act/followup-scheduler';
 import { addToDncList } from '@/lib/safety';
+import { resolveMultiIntentPrecedence, CanonicalIntent } from '@/lib/policy/reply-precedence';
 
 export async function GET(request: NextRequest) {
   const traceId = createTraceId();
@@ -329,16 +330,39 @@ export async function POST(request: NextRequest) {
       return ok({ success: true, message: 'Lead permanently added to DNC blacklist with 0 future sends' }, traceId);
     }
 
-    // 6. Manual Reclassification
+    // 6. Manual Reclassification with Versioned Policy Precedence
     if (action === 'reclassify') {
       if (!newCategory) return badRequest('newCategory is required for reclassification', traceId);
+      const normalizedIntent = newCategory.toUpperCase().replace(/\s+/g, '_') as CanonicalIntent;
+      const precedence = resolveMultiIntentPrecedence([normalizedIntent]);
       if (messageId) {
         await db.replyClassification.updateMany({
-          where: { messageId, organizationId: context.organizationId },
-          data: { category: newCategory },
+          where: { messageId, ...(context.organizationId ? { organizationId: context.organizationId } : {}) },
+          data: {
+            category: newCategory.toLowerCase(),
+            confidence: 1.0,
+            nextAction: precedence.required_action,
+            reasoning: `Manual reclassification to ${newCategory} by operator. Policy: ${precedence.selected_policy}`,
+            metadata: {
+              primary_intent: precedence.primary_intent,
+              secondary_intents: precedence.secondary_intents,
+              risk_flags: precedence.risk_flags,
+              policy_version: precedence.policy_version,
+              selected_policy: precedence.selected_policy,
+              required_action: precedence.required_action,
+              manuallyReclassified: true,
+              reclassifiedAt: new Date().toISOString(),
+            },
+          },
         });
       }
-      return ok({ success: true, category: newCategory }, traceId);
+      return ok({
+        success: true,
+        category: newCategory,
+        policy_version: precedence.policy_version,
+        selected_policy: precedence.selected_policy,
+        required_action: precedence.required_action,
+      }, traceId);
     }
 
     return badRequest(`Unknown action: ${action}`, traceId);
